@@ -42,6 +42,12 @@ if (typeof base === "function") base = await base({ command: "serve", mode: "dev
 const config = mergeConfig(base, {
   root: ROOT,
   envDir: ENV_DIR,
+  // CRITICAL: we already loaded vite.config.ts manually above. Without this,
+  // createServer() would load the config file a SECOND time and CONCATENATE
+  // its plugins with the ones we pass inline — every TanStack/Lovable plugin
+  // registered twice, so the server-fn transform runs twice on its own output
+  // and crashes with `Duplicate declaration "createClientRpc"`.
+  configFile: false,
   // Dev-only workaround: the TSS start-compiler cannot analyze vite's
   // prebundled deps (fails with "could not load module info for
   // .vite/deps/zod.js?..."), which blocks server-fn registration so every

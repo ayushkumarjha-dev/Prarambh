@@ -50,7 +50,7 @@ try {
   /* keep default */
 }
 process.env.RESEND_API_KEY ??= "re_test_local_mock_not_a_real_key";
-process.env.RESEND_FROM ??= "ExamPortal Tests <no-reply@loadtest.example>";
+process.env.RESEND_FROM ??= "Prarambh Tests <no-reply@loadtest.example>";
 process.env.RESEND_BASE_URL ??= `http://127.0.0.1:${process.env.RESEND_MOCK_PORT ?? 4599}`;
 
 // 1. Resend mock — fails fast on port conflict, guarantees zero real emails.

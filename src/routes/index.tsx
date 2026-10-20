@@ -9,16 +9,19 @@ import {
   ClipboardCheck,
   Download,
   FileUp,
+  LifeBuoy,
   Link2,
   LockKeyhole,
   MousePointerClick,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Users,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LogoMark } from "@/components/LogoMark";
 import { brand, footerCopyright } from "@/config/brand";
 import { promptInstall, useInstallPrompt } from "@/lib/pwa";
 
@@ -60,32 +63,75 @@ const STATS = [
 
 const FAQS = [
   {
+    cat: "Students",
     q: "How do I join my exam?",
     a: "Open the private exam link your organizer shared, enter your name, email and the password they gave you, then click Start. No account or signup needed.",
   },
   {
+    cat: "Students",
     q: "What happens if my time runs out?",
     a: "Your answers save automatically as you go, and the test submits itself the moment the timer hits zero. Nothing is lost.",
   },
   {
+    cat: "Students",
     q: "Can I take the exam on my phone?",
     a: "Yes. Install the Prarambh app to your home screen for the best experience, open your exam link, and log in as usual. Phones can't lock into full-screen proctoring, so leaving the app or switching tabs still counts as a violation — a laptop or desktop remains the smoothest option.",
   },
   {
+    cat: "Students",
     q: "What counts as a violation?",
     a: "Leaving the exam — full-screen on desktop, or the app/tab on phones — counts as a violation. Three violations submit the test automatically — reloading the page itself is safe.",
   },
   {
+    cat: "Students",
     q: "I forgot my password. What do I do?",
     a: "Passwords are issued by your organizer. Ask them to regenerate yours — it takes them a few seconds from their dashboard.",
   },
-];
+  {
+    cat: "Students",
+    q: "Will my answers be saved if my internet drops?",
+    a: "Yes. Every answer is saved to the server the moment you select it, so a brief disconnection won't lose your progress — rejoin with your link and credentials and you continue where you left off.",
+  },
+  {
+    cat: "Organizers",
+    q: "How do I create my first exam?",
+    a: "Log in to the organizer dashboard, open Exams, and create a new exam — set the duration, marks and schedule, add your questions (or bulk-upload from CSV/Excel), then enable it. A private link is generated for you to share.",
+  },
+  {
+    cat: "Organizers",
+    q: "How do students get their passwords?",
+    a: "Add students one by one or bulk-upload a roster — unique passwords are auto-generated for each student, scoped to that exam only. Download the credential list to share, or send it to them in bulk by email.",
+  },
+  {
+    cat: "Organizers",
+    q: "What question types are supported?",
+    a: "Single-correct MCQ, multi-correct MCQ, and True/False. Questions can be entered one by one in the editor or bulk-uploaded from CSV and Excel.",
+  },
+  {
+    cat: "Organizers",
+    q: "Can I watch results live?",
+    a: "Yes — the dashboard updates as students submit. Scores are auto-graded with ranks, pass/fail, per-question analytics, and CSV, Excel and PDF exports.",
+  },
+  {
+    cat: "Organizers",
+    q: "Can I reset a student's password?",
+    a: "Yes. From the Participants view you can regenerate any student's password instantly, and disable a credential if it was shared by mistake.",
+  },
+  {
+    cat: "Organizers",
+    q: "Is there a limit on exams or students?",
+    a: "None. Create as many exams as you need and upload rosters of any size — the platform is self-hosted, so the only limits are your server's capacity.",
+  },
+] as const;
 
 function LandingPage() {
   const navigate = useNavigate();
   const [code, setCode] = useState("");
   const [codeError, setCodeError] = useState<string | null>(null);
   const [openFaq, setOpenFaq] = useState<number | null>(0);
+  const [faqFilter, setFaqFilter] = useState<"All" | "Students" | "Organizers">("All");
+
+  const visibleFaqs = FAQS.filter((f) => faqFilter === "All" || f.cat === faqFilter);
 
   function goToExam(e: React.FormEvent) {
     e.preventDefault();
@@ -104,9 +150,7 @@ function LandingPage() {
       <header className="sticky top-0 z-10 border-b border-border/80 bg-background/85 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
           <Link to="/" className="flex items-center gap-2.5" aria-label={`${brand.appName} home`}>
-            <span className="grid size-9 place-items-center rounded-xl bg-brand font-mono text-sm font-semibold text-brand-foreground shadow-sm">
-              {brand.logoMark}
-            </span>
+            <LogoMark className="size-9 rounded-xl shadow-sm" />
             <span className="text-lg font-semibold tracking-tight">{brand.appName}</span>
           </Link>
           <nav className="flex items-center gap-1" aria-label="Primary">
@@ -403,9 +447,33 @@ function LandingPage() {
           <h2 id="faq-heading" className="mt-3 text-3xl tracking-tight sm:text-4xl">
             Questions, answered
           </h2>
+          <div
+            className="mt-7 inline-flex rounded-full border border-border bg-card p-1"
+            role="tablist"
+            aria-label="Filter questions"
+          >
+            {(["All", "Students", "Organizers"] as const).map((f) => (
+              <button
+                key={f}
+                role="tab"
+                aria-selected={faqFilter === f}
+                onClick={() => {
+                  setFaqFilter(f);
+                  setOpenFaq(null);
+                }}
+                className={`rounded-full px-5 py-2 text-sm font-medium transition-colors ${
+                  faqFilter === f
+                    ? "bg-brand text-brand-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="mt-8 space-y-3">
-          {FAQS.map((f, i) => {
+          {visibleFaqs.map((f, i) => {
             const open = openFaq === i;
             return (
               <div
@@ -417,13 +485,24 @@ function LandingPage() {
                   aria-expanded={open}
                   className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
                 >
-                  <span className="font-medium">{f.q}</span>
+                  <span className="flex items-center gap-3">
+                    <span
+                      className={`mono-label shrink-0 rounded-full px-2 py-0.5 text-[10px] ${
+                        f.cat === "Organizers"
+                          ? "bg-brand/10 text-brand"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {f.cat}
+                    </span>
+                    <span className="font-medium">{f.q}</span>
+                  </span>
                   <ChevronDown
                     className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
                   />
                 </button>
                 {open ? (
-                  <p className="px-5 pb-5 text-[15px] leading-relaxed text-muted-foreground">
+                  <p className="px-5 pb-5 text-[15px] leading-relaxed text-muted-foreground sm:pl-[5.4rem]">
                     {f.a}
                   </p>
                 ) : null}
@@ -473,28 +552,118 @@ function LandingPage() {
         </div>
       </section>
 
-      <footer className="border-t border-border">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-5 py-8 text-sm text-muted-foreground sm:flex-row">
-          <p className="flex items-center gap-2">
-            <span className="grid size-7 place-items-center rounded-lg bg-brand font-mono text-[11px] font-semibold text-brand-foreground">
-              {brand.logoMark}
-            </span>
-            {footerCopyright()}
-          </p>
-          <nav className="flex items-center gap-5" aria-label="Footer">
-            <a href="#join" className="transition-colors hover:text-foreground">
-              Join exam
-            </a>
-            <Link to="/panel-admin-login" className="transition-colors hover:text-foreground">
-              Organizer login
-            </Link>
-            <a
-              className="transition-colors hover:text-foreground"
-              href={`mailto:${brand.supportEmail}`}
-            >
-              Support
-            </a>
-          </nav>
+      <footer className="border-t border-border bg-muted/30">
+        <div className="mx-auto max-w-6xl px-5 py-14">
+          <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-[1.6fr_1fr_1fr_1.2fr]">
+            {/* Brand */}
+            <div className="max-w-xs">
+              <Link to="/" className="inline-flex items-center gap-2.5" aria-label={`${brand.appName} home`}>
+                <LogoMark className="size-9 rounded-xl shadow-sm" />
+                <span className="text-lg font-semibold tracking-tight">{brand.appName}</span>
+              </Link>
+              <p className="mt-4 text-sm leading-relaxed text-muted-foreground">
+                {brand.footerNote}. Private exam links, per-student credentials, and server-side
+                proctoring — so every test stays fair.
+              </p>
+              <a
+                href={`mailto:${brand.supportEmail}`}
+                className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-brand transition-colors hover:text-brand/80"
+              >
+                <LifeBuoy className="size-4" /> {brand.supportEmail}
+              </a>
+            </div>
+
+            {/* Students */}
+            <nav aria-label="For students">
+              <h3 className="mono-label text-muted-foreground">Students</h3>
+              <ul className="mt-4 space-y-3 text-sm">
+                <li>
+                  <a href="#join" className="text-muted-foreground transition-colors hover:text-foreground">
+                    Join your exam
+                  </a>
+                </li>
+                <li>
+                  <a
+                    href="#how-it-works"
+                    className="text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    How it works
+                  </a>
+                </li>
+                <li>
+                  <a href="#faq" className="text-muted-foreground transition-colors hover:text-foreground">
+                    Student FAQ
+                  </a>
+                </li>
+              </ul>
+            </nav>
+
+            {/* Organizers */}
+            <nav aria-label="For organizers">
+              <h3 className="mono-label text-muted-foreground">Organizers</h3>
+              <ul className="mt-4 space-y-3 text-sm">
+                <li>
+                  <Link
+                    to="/panel-admin-login"
+                    className="text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    Organizer login
+                  </Link>
+                </li>
+                <li>
+                  <a
+                    href="#features"
+                    className="text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    Features
+                  </a>
+                </li>
+                <li>
+                  <a href="#faq" className="text-muted-foreground transition-colors hover:text-foreground">
+                    Organizer FAQ
+                  </a>
+                </li>
+              </ul>
+            </nav>
+
+            {/* Platform */}
+            <div>
+              <h3 className="mono-label text-muted-foreground">Platform</h3>
+              <ul className="mt-4 space-y-3 text-sm text-muted-foreground">
+                <li className="flex items-center gap-2">
+                  <ShieldCheck className="size-4 shrink-0 text-brand" /> Server-side scoring
+                </li>
+                <li className="flex items-center gap-2">
+                  <LockKeyhole className="size-4 shrink-0 text-brand" /> Unique student passwords
+                </li>
+                <li className="flex items-center gap-2">
+                  <AlarmClock className="size-4 shrink-0 text-brand" /> Auto-submit on timeout
+                </li>
+                <li className="flex items-center gap-2">
+                  <Smartphone className="size-4 shrink-0 text-brand" /> Installable app (PWA)
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          {/* Bottom bar */}
+          <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t border-border pt-7 text-sm text-muted-foreground sm:flex-row">
+            <p>{footerCopyright()} — {brand.tagline}.</p>
+            <nav className="flex items-center gap-5" aria-label="Footer">
+              <a href="#join" className="transition-colors hover:text-foreground">
+                Join exam
+              </a>
+              <Link to="/panel-admin-login" className="transition-colors hover:text-foreground">
+                Organizer login
+              </Link>
+              <a
+                className="transition-colors hover:text-foreground"
+                href={`mailto:${brand.supportEmail}`}
+              >
+                Support
+              </a>
+            </nav>
+          </div>
         </div>
       </footer>
     </main>

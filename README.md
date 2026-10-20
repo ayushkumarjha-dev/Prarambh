@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="public/favicon.png" alt="ExamPortal logo" width="88" />
+<img src="public/favicon.png" alt="Prarambh logo" width="88" />
 
-# ExamPortal
+# Prarambh
 
 ### Secure, Seamless Online Exams
 
@@ -56,9 +56,9 @@ server-side.
 
 ## Overview
 
-**ExamPortal** removes the three pain points of running an online test:
+**Prarambh** removes the three pain points of running an online test:
 
-| Pain point                                            | How ExamPortal solves it                                                                                                              |
+| Pain point                                            | How Prarambh solves it                                                                                                              |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Shared/open links get forwarded to anyone             | Each exam gets a private, hard-to-guess slug URL (`/exam/<slug>`) with enable/disable, regeneration, and an optional start/end window |
 | One password for the whole class, impossible to audit | Per-student credentials — name + email + an auto-generated 10-char password, hashed with a unique salt, scoped to exactly one exam    |
@@ -158,7 +158,7 @@ flowchart TB
    (`submitExam`, `incrementViolation`) — atomic and idempotent, safe under
    retries, reloads, and double-submit races.
 4. **Sessions** — students hold opaque `session_token` UUIDs stored per exam
-   in `localStorage` (`examportal.session.<slug>`); organizers hold a
+   in `localStorage` (`Prarambh.session.<slug>`); organizers hold a
    stateless HMAC token (30-day expiry) in `localStorage`. Passwords never
    leave the server in plain text except at the moment of creation (shown
    once).
@@ -338,7 +338,7 @@ sequenceDiagram
         loginExamParticipant-->>Login Page: "Exam has not started yet" / "Exam has ended" / "already submitted"
     else ok
         loginExamParticipant-->>Login Page: { token }
-        Login Page->>Browser: save examportal.session.slug
+        Login Page->>Browser: save Prarambh.session.slug
         Login Page->>Instructions: navigate
     end
 ```
@@ -416,7 +416,7 @@ Click **Manage** on an exam, then:
 {
   "meta": {
     "event": "Physics Midterm 2026",
-    "organiser": "ExamPortal",
+    "organiser": "Prarambh",
     "total_questions": 1,
     "marks_correct": 2,
     "marks_wrong": -0.5,
@@ -610,7 +610,7 @@ migrations/                       # SQL migrations applied by npm run db:migrate
 
 | What                                    | Where                                                                                                           |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Name, logo mark, tagline, support email | `src/config/brand.ts` (`appName`, `logoMark`, `tagline`, `supportEmail`) — default neutral name: **ExamPortal** |
+| Name, logo mark, tagline, support email | `src/config/brand.ts` (`appName`, `logoMark`, `tagline`, `supportEmail`) — default neutral name: **Prarambh** |
 | Colors & typography                     | `src/styles.css` (`@theme` + `:root`/`.dark` oklch tokens: `brand`, `stone`, `pale-green`, `coral`, …)          |
 | Secrets                                 | Environment variables only (`.env`, git-ignored)                                                                |
 
@@ -752,7 +752,7 @@ panel.
 
 <div align="center">
 
-**ExamPortal** — secure, seamless online exams
+**Prarambh** — secure, seamless online exams
 
 [Features](#features) · [Architecture](#architecture) · [API Reference](#api-reference) · [Getting Started](#getting-started) · [FAQ](#faq)
 

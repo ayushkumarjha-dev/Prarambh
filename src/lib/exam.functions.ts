@@ -2,6 +2,15 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 /**
+ * Proctoring limit — MAX_VIOLATIONS (default 3). 0 disables auto-submit,
+ * N >= 1 stops the attempt on the Nth violation. Server-side only.
+ */
+function violationLimit(): number {
+  const raw = Number(process.env["MAX_VIOLATIONS"] ?? "3");
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 3;
+}
+
+/**
  * Multi-exam server functions.
  *
  * Every student credential belongs to exactly one exam (participants.exam_id).
@@ -249,18 +258,23 @@ export const loginExamParticipant = createServerFn({ method: "POST" })
       throw new Error("You have already submitted this exam.");
     }
 
+    // Single active session per participant: every successful login rotates the
+    // token, so a second device ends the first session (bug B3). The old device
+    // sees `saved: false` on its next answer/state read and is sent back to login.
+    const nextToken = crypto.randomUUID();
     await db
       .from("participants")
       .update({
         failed_attempts: 0,
         locked_until: null,
+        session_token: nextToken,
         // Keep the roster fresh when a student types their name differently.
         ...(participant.name !== data.name.trim() ? { name: data.name.trim() } : {}),
       })
       .eq("id", participant.id);
 
     return {
-      token: participant.session_token as string,
+      token: nextToken,
       name: (participant.name ?? data.name.trim()) as string,
     };
   });
@@ -332,6 +346,7 @@ export const getExamState = createServerFn({ method: "POST" })
       status,
       examStartedAt: p.exam_started_at as string | null,
       violations: p.tab_violation_count as number,
+      maxViolations: violationLimit(),
       serverNow: new Date().toISOString(),
       meta,
       examTitle: exam.title as string,
@@ -401,8 +416,9 @@ export const saveAnswer = createServerFn({ method: "POST" })
       .eq("session_token", data.token)
       .maybeSingle();
 
-    if (!p || p.status !== "in_progress") return { saved: false };
-    if ((p as any).exams?.slug !== data.slug) return { saved: false };
+    if (!p) return { saved: false, invalidSession: true };
+    if ((p as any).exams?.slug !== data.slug) return { saved: false, invalidSession: true };
+    if (p.status !== "in_progress") return { saved: false, invalidSession: false };
 
     const { error } = await db.from("responses").upsert(
       {
@@ -434,11 +450,12 @@ export const reportViolation = createServerFn({ method: "POST" })
       p_participant: p.id,
     });
     const n = Number(count ?? 0);
-    if (n >= 3) {
+    const limit = violationLimit();
+    if (limit > 0 && n >= limit) {
       await db.rpc("submit_exam", { p_participant: p.id, p_reason: "violation" });
-      return { count: n, submitted: true };
+      return { count: n, submitted: true, limit };
     }
-    return { count: n, submitted: false };
+    return { count: n, submitted: false, limit };
   });
 
 export const submitExam = createServerFn({ method: "POST" })

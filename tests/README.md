@@ -1,4 +1,4 @@
-# Test suite — ExamPortal (Phase 0: environment, seeding, email mock)
+# Test suite — Prarambh (Phase 0: environment, seeding, email mock)
 
 > **Safety rules enforced by tooling**
 >

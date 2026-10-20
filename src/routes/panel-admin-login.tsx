@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { LogoMark } from "@/components/LogoMark";
 import { brand } from "@/config/brand";
 import { authClient } from "@/integrations/turso/auth-client";
 
@@ -62,7 +63,8 @@ function AdminLogin() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-5 py-16">
       <form onSubmit={onSubmit} className="w-full max-w-sm rounded-[22px] border border-border p-8">
-        <p className="mono-label text-muted-foreground">{brand.appName}</p>
+        <LogoMark className="size-12 rounded-2xl shadow-sm" />
+        <p className="mono-label mt-4 text-muted-foreground">{brand.appName}</p>
         <h1 className="mt-2 text-3xl">Organizer Login</h1>
         <p className="mt-2 text-sm text-muted-foreground">
           Create exams, share private links, and manage student credentials.

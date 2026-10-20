@@ -1,5 +1,5 @@
 /**
- * Load-test contract for the ExamPortal k6 suite (Phase 5).
+ * Load-test contract for the Prarambh k6 suite (Phase 5).
  *
  * Server functions are NOT plain JSON over HTTP: request bodies are seroval
  * cross-JSON of `{ data }` (see tests/lib/serverfn.mjs), function IDs are

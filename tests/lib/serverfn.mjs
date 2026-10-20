@@ -17,6 +17,11 @@
  * tests/load/gen-payloads.mjs instead of hand-building JSON in k6.
  */
 import { toJSONAsync, fromCrossJSON } from "seroval";
+// Same plugins the real client uses (`getDefaultSerovalPlugins()` in
+// @tanstack/start-client-core). ShallowErrorPlugin deserializes the
+// `$TSR/Error` nodes the server sends for thrown errors — with an empty
+// plugin list fromCrossJSON throws "Seroval Error (step: 3)".
+import { defaultSerovalPlugins } from "@tanstack/router-core/ssr/client";
 
 export const SERVER_FN_FILES = {
   exam: "/src/lib/exam.functions.ts?tss-serverfn-split",
@@ -29,6 +34,31 @@ export function fnId(file, exportName) {
     JSON.stringify({ file, export: `${exportName}_createServerFn_handler` }),
     "utf8",
   ).toString("base64url");
+}
+
+/** Plain (non-split) provider module paths — what a browser GETs when a page imports them. */
+export const PROVIDER_MODULES = Object.values(SERVER_FN_FILES).map((f) => f.split("?")[0]);
+
+/**
+ * Register the provider files' server fns on a running dev server.
+ *
+ * TanStack Start only inserts a server fn into its dev lookup table
+ * (serverFnsById, in-memory) when some environment COMPILES the plain
+ * provider module — exactly what a browser does the moment a page imports
+ * it. Pure API-style clients (smoke, k6, e2e API calls) never load a page,
+ * so without this warm-up the server answers 500 "Invalid server function
+ * ID". These GETs perform the identical client transform a page load would.
+ * Idempotent and cheap — call it from every entry point, and again after a
+ * dev-server restart (the table does not survive a restart).
+ */
+export async function warmUpServerFns(base) {
+  for (const path of PROVIDER_MODULES) {
+    const res = await fetch(new URL(path, base), {
+      headers: { accept: "*/*" },
+    });
+    if (!res.ok) throw new Error(`server-fn warm-up ${path} failed: HTTP ${res.status}`);
+    await res.text(); // drain the body
+  }
 }
 
 /** Serialize a `data` payload exactly like the TSS client does (for k6 precompute too). */
@@ -73,14 +103,17 @@ export async function callServerFn(base, options) {
   if (res.headers.get("x-tss-serialized") && ct.includes("application/json")) {
     let de;
     try {
-      de = fromCrossJSON(JSON.parse(text), { plugins: [] });
+      de = fromCrossJSON(JSON.parse(text), { plugins: defaultSerovalPlugins });
     } catch (e) {
       error = e;
       de = undefined;
     }
     if (de instanceof Error) error = de;
-    else if (de && typeof de === "object" && "result" in de && Object.keys(de).length <= 2) result = de.result;
-    else result = de;
+    else if (de && typeof de === "object" && "result" in de) {
+      // TSS server-fn response envelope: { result, error, context }.
+      if (de.error) error = de.error instanceof Error ? de.error : new Error(String(de.error?.message ?? de.error));
+      result = de.result;
+    } else result = de;
   } else if (ct.includes("application/json")) {
     try {
       const j = JSON.parse(text);

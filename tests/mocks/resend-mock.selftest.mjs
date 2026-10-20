@@ -15,7 +15,7 @@ let res = await fetch(`${base}/emails`, {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({
-    from: "ExamPortal Tests <no-reply@loadtest.example>",
+    from: "Prarambh Tests <no-reply@loadtest.example>",
     to: "loadtest_s001@loadtest.example",
     subject: "Your exam login: loadtest_standard 25q 30m",
     text: "Hi loadtest_ Student S-001,\nName: loadtest_ Student S-001\nRoll No: LT-S-001\nPassword: Ab3!xyzQw7@\nExam link: http://localhost:5173/exam/loadtest-standard-25q",

@@ -11,7 +11,7 @@ export const brand = {
   logoMark: "P",
   /** Generic footer owner placeholder. */
   footerNote: "Secure online examination platform",
-  supportEmail: "support@example.com",
+  supportEmail: "ayushkrjha85@gmail.com",
 } as const;
 
 export function footerCopyright(year: number = new Date().getFullYear()): string {

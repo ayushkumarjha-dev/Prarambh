@@ -38,6 +38,16 @@ dist-ssr
 !.env.test.example
 tests/.artifacts/
 
+# QA500 k6 payload copy (serialized credentials + session tokens - never commit)
+tests/qa500/k6/payloads-qa500.json
+
+# k6 binaries (64MB platform-specific — download from
+# https://github.com/grafana/k6/releases, see tests/qa500/README.md)
+tools/
+
+# This repo is managed with bun (bun.lock); npm's lockfile is a local artifact
+package-lock.json
+
 # Local SQLite dev database (file: TURSO_DATABASE_URL)
 *.db
 *.db-journal

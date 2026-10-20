@@ -51,12 +51,19 @@ function ExamPage() {
   const [current, setCurrent] = useState(0);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [violations, setViolations] = useState(0);
+  const [maxViolations, setMaxViolations] = useState(3);
+  const [pendingSaves, setPendingSaves] = useState(0);
+  const [submitPending, setSubmitPending] = useState(false);
   const [blocked, setBlocked] = useState<"none" | "fullscreen" | "violation" | "terminated">(
     "none",
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const isPhone = useIsPhone();
+  // Device class at entry. Narrowing the window mid-exam (split-screen, snap,
+  // rotation) must NEVER replace a running attempt with the phone notice (B9);
+  // real phones are already "phone" on the very first render.
+  const phoneAtEntry = useRef(isPhone).current;
   const [needsAck, ackMobile] = useMobileAck(slug);
   // Phones (and browsers without the Fullscreen API) take the exam without
   // the full-screen lock; tab-switch detection still applies.
@@ -70,27 +77,97 @@ function ExamPage() {
   const armedRef = useRef(false);
   const handlingRef = useRef(false);
   const submittedRef = useRef(false);
-  const saveTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  /** True from beforeunload/pagehide on — suppresses reload-induced violations (B8). */
+  const leavingRef = useRef(false);
+  /** Answers waiting for the server (persistent retry ladder, bug B2). */
+  const outboxRef = useRef<
+    Record<number, { option: string; attempts: number; v: number; timer?: ReturnType<typeof setTimeout> }>
+  >({});
+  /** Pending manual/timeout submit while offline (bug B1). */
+  const submitReasonRef = useRef<"manual" | "timeout" | null>(null);
+  /** Monotonic version per answer so a stale retry cannot overwrite a newer one. */
+  const saveVersion = useRef(0);
+
+  const SUBMIT_KEY = `exam-submit:${slug}`;
 
   const goSubmitted = useCallback(() => {
     submittedRef.current = true;
+    submitReasonRef.current = null;
+    try {
+      localStorage.removeItem(SUBMIT_KEY);
+    } catch {
+      /* storage unavailable */
+    }
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     navigate({ to: "/exam/$slug/submitted", params: { slug } });
-  }, [navigate, slug]);
+  }, [SUBMIT_KEY, navigate, slug]);
+
+  /**
+   * Flush a queued submit. Returns true only when the server ACKed it.
+   * Never navigates on failure — that was bug B1 (a swallowed error showed the
+   * success page while the attempt stayed open server-side).
+   */
+  const flushSubmit = useCallback(async () => {
+    const queued = submitReasonRef.current;
+    if (!queued || !session || submittedRef.current) return true;
+    try {
+      await finishExam({ data: { slug, token: session.token, reason: queued } });
+      goSubmitted();
+      return true;
+    } catch {
+      return false; // stay queued; the retry effect keeps trying
+    }
+  }, [finishExam, goSubmitted, session, slug]);
 
   const doSubmit = useCallback(
     async (reason: "manual" | "timeout") => {
       if (submittedRef.current || !session) return;
-      submittedRef.current = true;
+      if (!submitReasonRef.current) submitReasonRef.current = reason;
+      // Persist the intent so a reload/crash while offline still submits.
       try {
-        await finishExam({ data: { slug, token: session.token, reason } });
+        localStorage.setItem(SUBMIT_KEY, JSON.stringify({ reason: submitReasonRef.current }));
       } catch {
-        /* server also enforces timeout on next read */
+        /* storage unavailable */
       }
-      goSubmitted();
+      setSubmitPending(true);
+      const ok = await flushSubmit();
+      if (!ok) {
+        toast.error("No connection — your answers are safe and the test will submit automatically.");
+      }
     },
-    [finishExam, goSubmitted, session, slug],
+    [SUBMIT_KEY, flushSubmit, session],
   );
+
+  // Retry a queued submit until the server ACKs it (online event + interval).
+  useEffect(() => {
+    if (!submitPending || loading) return;
+    const tick = () => {
+      if (submitReasonRef.current) void flushSubmit();
+    };
+    const id = setInterval(tick, 5000);
+    window.addEventListener("online", tick);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("online", tick);
+    };
+  }, [submitPending, flushSubmit, loading]);
+
+  // Resume a submit that was queued while offline before a reload/crash.
+  useEffect(() => {
+    if (loading) return;
+    let queued: { reason?: "manual" | "timeout" } | null = null;
+    try {
+      const raw = localStorage.getItem(SUBMIT_KEY);
+      if (raw) queued = JSON.parse(raw) as { reason?: "manual" | "timeout" };
+    } catch {
+      /* ignore malformed storage */
+    }
+    if (queued?.reason && !submittedRef.current) {
+      submitReasonRef.current = queued.reason;
+      setSubmitPending(true);
+      void flushSubmit();
+    }
+  }, [SUBMIT_KEY, flushSubmit, loading]);
 
   const sync = useCallback(async () => {
     if (!session) return;
@@ -111,6 +188,7 @@ function ExamPage() {
     setMeta(state.meta);
     setExamTitle(state.examTitle);
     setViolations(state.violations);
+    setMaxViolations(state.maxViolations ?? 3);
     setQuestions(state.questions);
     setAnswers((prev) => ({ ...(state.answers as Record<number, string>), ...prev }));
   }, [fetchState, goSubmitted, navigate, session, slug]);
@@ -153,7 +231,11 @@ function ExamPage() {
     if (loading) return;
     const interval = 25000 + Math.floor(Math.random() * 8000);
     const id = setInterval(() => {
-      if (!submittedRef.current) sync().catch(() => {});
+      if (!submittedRef.current)
+        sync().catch((err) => {
+          // Token rotated by a login on another device → this session is over (B3).
+          if (err instanceof Error && err.message.includes("NOT_AUTHENTICATED")) sessionReplaced();
+        });
     }, interval);
     return () => clearInterval(id);
   }, [loading, sync]);
@@ -164,7 +246,7 @@ function ExamPage() {
       if (deadlineRef.current == null) return;
       const left = Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000));
       setRemaining(left);
-      if (left <= 0 && !submittedRef.current) void doSubmit("timeout");
+      if (left <= 0 && !submittedRef.current && !submitReasonRef.current) void doSubmit("timeout");
     }, 1000);
     return () => clearInterval(id);
   }, [doSubmit]);
@@ -189,7 +271,8 @@ function ExamPage() {
     }
   }, [flagViolation, goSubmitted, session, slug]);
 
-  // full-screen + tab-switch enforcement (full-screen lock only where supported)
+  // full-screen + tab-switch + resize/copy enforcement.
+  // (full-screen lock only where supported; reload never counts — B8)
   useEffect(() => {
     if (loading) return;
 
@@ -203,40 +286,122 @@ function ExamPage() {
       setBlocked((b) => (b === "none" ? "fullscreen" : b));
     }
 
+    // Reload / navigation intent: the page is intentionally going away.
+    const onLeaving = () => {
+      leavingRef.current = true;
+      // Remember the reload so the next mount can ignore unload noise (B8).
+      try {
+        sessionStorage.setItem(RELOAD_KEY, "1");
+      } catch {
+        /* storage unavailable */
+      }
+    };
+    window.addEventListener("beforeunload", onLeaving);
+    window.addEventListener("pagehide", onLeaving);
+
+    // Only reloads get a grace window; a normal exam start is strict from t=0.
+    const graceUntil = afterReload ? Date.now() + 2500 : 0;
+    const canReport = () =>
+      armedRef.current &&
+      !submittedRef.current &&
+      !leavingRef.current &&
+      Date.now() > graceUntil;
+    const flag = () => {
+      if (canReport()) void handleViolation();
+    };
+
+    let baseline = { w: window.innerWidth, h: window.innerHeight };
+    // Fullscreen transitions resize the viewport too — never count those (B5).
+    let fsTransitionUntil = 0;
+    const syncBaseline = () => {
+      baseline = { w: window.innerWidth, h: window.innerHeight };
+    };
+
     const onFsChange = () => {
+      fsTransitionUntil = Date.now() + 2000;
+      syncBaseline();
       if (document.fullscreenElement) {
         armedRef.current = true;
         setBlocked((b) => (b === "fullscreen" ? "none" : b));
-      } else if (armedRef.current && !submittedRef.current) {
+      } else if (canReport()) {
         void handleViolation();
       }
     };
     const onHidden = () => {
-      if (document.visibilityState === "hidden" && armedRef.current && !submittedRef.current) {
-        void handleViolation();
-      }
+      if (document.visibilityState === "hidden") flag();
     };
     // Window lost focus (Windows key, Alt+Tab, another app/browser opened on top)
-    const onBlur = () => {
-      if (armedRef.current && !submittedRef.current) void handleViolation();
-    };
+    const onBlur = () => flag();
     // Safety net: some OS switches don't fire blur reliably
     let wasFocused = document.hasFocus();
     const focusPoll = setInterval(() => {
       const focused = document.hasFocus();
-      if (wasFocused && !focused && armedRef.current && !submittedRef.current) {
+      if (wasFocused && !focused && canReport() && document.visibilityState === "visible") {
         void handleViolation();
       }
       wasFocused = focused;
     }, 1000);
+
+    // Split-screen / half-screen snap / big window resize (B5).
+    const onResize = () => {
+      // Resizes caused by entering/leaving fullscreen are legitimate.
+      if (Date.now() < fsTransitionUntil) {
+        syncBaseline();
+        return;
+      }
+      const dw = Math.abs(window.innerWidth - baseline.w);
+      const dh = Math.abs(window.innerHeight - baseline.h);
+      if (dw > Math.max(180, baseline.w * 0.22) || dh > Math.max(180, baseline.h * 0.25)) {
+        syncBaseline();
+        flag();
+      }
+    };
+    const onOrientation = () => flag();
+
+    // Devtools / print / copy guards (B6).
+    const onContextMenu = (e: MouseEvent) => {
+      if (!canReport()) return;
+      e.preventDefault();
+      void handleViolation();
+    };
+    const onCopyLike = () => flag();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!canReport()) return;
+      const k = e.key.toUpperCase();
+      const mod = e.ctrlKey || e.metaKey;
+      const devtools = k === "F12" || (mod && e.shiftKey && (k === "I" || k === "J" || k === "C"));
+      const print = mod && k === "P";
+      const printScr = k === "PRINTSCREEN";
+      if (devtools || print || printScr) {
+        e.preventDefault();
+        void handleViolation();
+      }
+    };
+
     document.addEventListener("fullscreenchange", onFsChange);
     document.addEventListener("visibilitychange", onHidden);
     window.addEventListener("blur", onBlur);
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onOrientation);
+    document.addEventListener("contextmenu", onContextMenu);
+    document.addEventListener("copy", onCopyLike);
+    document.addEventListener("cut", onCopyLike);
+    document.addEventListener("paste", onCopyLike);
+    window.addEventListener("keydown", onKeyDown);
     return () => {
       clearInterval(focusPoll);
+      window.removeEventListener("beforeunload", onLeaving);
+      window.removeEventListener("pagehide", onLeaving);
       document.removeEventListener("fullscreenchange", onFsChange);
       document.removeEventListener("visibilitychange", onHidden);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onOrientation);
+      document.removeEventListener("contextmenu", onContextMenu);
+      document.removeEventListener("copy", onCopyLike);
+      document.removeEventListener("cut", onCopyLike);
+      document.removeEventListener("paste", onCopyLike);
+      window.removeEventListener("keydown", onKeyDown);
     };
   }, [canLockFullscreen, handleViolation, loading]);
 
@@ -244,18 +409,85 @@ function ExamPage() {
     if (questions.length) setVisited((v) => ({ ...v, [questions[current]!.id]: true }));
   }, [current, questions]);
 
+  const OUTBOX_KEY = `exam-outbox:${slug}`;
+  const RELOAD_KEY = `exam-reload:${slug}`;
+  /** True when this mount follows a reload/back — suppresses unload noise only (B8). */
+  const [afterReload] = useState(() => {
+    try {
+      const v = sessionStorage.getItem(RELOAD_KEY);
+      if (v) sessionStorage.removeItem(RELOAD_KEY);
+      return Boolean(v);
+    } catch {
+      return false;
+    }
+  });
+
+  const activeSaves = () => Object.keys(outboxRef.current).length;
+
+  const persistOutbox = useCallback(() => {
+    try {
+      const map: Record<string, string> = {};
+      for (const [id, item] of Object.entries(outboxRef.current)) map[id] = item.option;
+      if (Object.keys(map).length) localStorage.setItem(OUTBOX_KEY, JSON.stringify(map));
+      else localStorage.removeItem(OUTBOX_KEY);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [OUTBOX_KEY]);
+
+  /** The session token was rotated by another device — end this session (B3). */
+  const sessionReplaced = useCallback(() => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
+    toast.error("This exam is now open on another device. This session has ended.");
+    navigate({ to: "/exam/$slug", params: { slug } });
+  }, [navigate, slug]);
+
+  /**
+   * Persistent answer outbox (B2): keeps retrying with a capped backoff until
+   * the server ACKs. Replaces the old 5-attempt (~13s) ladder that silently
+   * dropped answers on longer disconnects.
+   */
+  function flushAnswer(questionId: number, v: number) {
+    if (!session) return;
+    const attempt = async () => {
+      const cur = outboxRef.current[questionId];
+      if (!cur || cur.v !== v) return; // superseded by a newer answer
+      try {
+        const res = await persistAnswer({
+          data: { slug, token: session.token, questionId, option: cur.option },
+        });
+        if (res && res.invalidSession) {
+          sessionReplaced();
+          return;
+        }
+        const keep = outboxRef.current[questionId];
+        if (keep && keep.v !== v) return;
+        delete outboxRef.current[questionId];
+        persistOutbox();
+        setPendingSaves(activeSaves());
+      } catch {
+        const c = outboxRef.current[questionId];
+        if (!c || c.v !== v) return;
+        c.attempts += 1;
+        c.timer = setTimeout(() => void attempt(), Math.min(15000, 700 * 2 ** Math.min(c.attempts, 5)));
+        persistOutbox();
+        setPendingSaves(activeSaves());
+      }
+    };
+    void attempt();
+  }
+
   function queueSave(questionId: number, option: string) {
     if (!session) return;
-    clearTimeout(saveTimers.current[questionId]);
-    saveTimers.current[questionId] = setTimeout(() => {
-      const attempt = (tries: number) => {
-        persistAnswer({ data: { slug, token: session.token, questionId, option } }).catch(() => {
-          if (tries < 4) setTimeout(() => attempt(tries + 1), 800 * 2 ** tries);
-          else toast.error("An answer could not be saved. Check your connection.");
-        });
-      };
-      attempt(0);
-    }, 600);
+    saveVersion.current += 1;
+    const v = saveVersion.current;
+    const prev = outboxRef.current[questionId];
+    if (prev?.timer) clearTimeout(prev.timer);
+    outboxRef.current[questionId] = { option, attempts: 0, v };
+    persistOutbox();
+    setPendingSaves(activeSaves());
+    outboxRef.current[questionId]!.timer = setTimeout(() => flushAnswer(questionId, v), 600);
   }
 
   function selectOption(questionId: number, option: Letter) {
@@ -286,7 +518,33 @@ function ExamPage() {
     }
   }
 
-  if (needsAck) return <MobileNoticeScreen slug={slug} onContinue={ackMobile} />;
+  // Flush every queued answer as soon as the network returns.
+  useEffect(() => {
+    const on = () => {
+      for (const [id, item] of Object.entries(outboxRef.current)) flushAnswer(Number(id), item.v);
+    };
+    window.addEventListener("online", on);
+    return () => window.removeEventListener("online", on);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
+
+  // Restore answers that never reached the server before a reload/crash (B2).
+  useEffect(() => {
+    if (loading || !session) return;
+    let map: Record<string, string> = {};
+    try {
+      const raw = localStorage.getItem(OUTBOX_KEY);
+      if (raw) map = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      /* ignore malformed storage */
+    }
+    for (const [id, option] of Object.entries(map)) {
+      if (typeof option === "string" && option) queueSave(Number(id), option);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [OUTBOX_KEY, loading, session]);
+
+  if (needsAck && phoneAtEntry) return <MobileNoticeScreen slug={slug} onContinue={ackMobile} />;
 
   if (loading || !meta) {
     return (
@@ -306,8 +564,13 @@ function ExamPage() {
       <header className="sticky top-0 z-20 grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-border bg-brand px-4 text-brand-foreground sm:px-5">
         <p className="mono-label min-w-0 truncate font-semibold">{examTitle || brand.appName}</p>
         <div className="flex shrink-0 items-center gap-3">
+          {pendingSaves > 0 ? (
+            <span className="mono-label rounded-full bg-destructive/10 px-3 py-1 text-[10px] text-destructive">
+              {pendingSaves} unsaved
+            </span>
+          ) : null}
           <span className="mono-label hidden rounded-full bg-brand-foreground/10 px-3 py-1 text-[10px] sm:inline-flex">
-            Violations: {violations} / 3
+            Violations: {violations} / {maxViolations}
           </span>
           <span
             className={`font-mono text-xl font-semibold tabular-nums ${critical ? "text-coral" : ""}`}
@@ -447,7 +710,7 @@ function ExamPage() {
             <div className="mt-5 border-t border-border pt-4 text-xs text-muted-foreground">
               <p>Answered: {answeredCount}</p>
               <p>Unattempted: {questions.length - answeredCount}</p>
-              <p className="mt-2">Violations: {violations} / 3</p>
+              <p className="mt-2">Violations: {violations} / {maxViolations}</p>
             </div>
           </aside>
         </div>
@@ -477,6 +740,22 @@ function ExamPage() {
         </div>
       ) : null}
 
+      {submitPending ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-background/95 px-5 backdrop-blur">
+          <div className="w-full max-w-md rounded-[22px] border border-border bg-card p-8 text-center">
+            <p className="mono-label text-muted-foreground">Submitting</p>
+            <h2 className="mt-3 text-2xl">Waiting for the server…</h2>
+            <p className="mt-3 text-[15px] text-muted-foreground">
+              Your test has not been submitted yet. It will be sent automatically as soon as the connection
+              returns — keep this tab open.
+            </p>
+            <Button className="mt-6 rounded-[32px] px-7" onClick={() => void doSubmit("manual")}>
+              Retry now
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {blocked !== "none" ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-background/95 px-5 backdrop-blur">
           <div className="w-full max-w-lg rounded-[22px] border border-destructive bg-card p-8 text-center">
@@ -493,15 +772,15 @@ function ExamPage() {
               </>
             ) : blocked === "violation" ? (
               <>
-                <p className="mono-label text-destructive">Violation {violations} of 3</p>
+                <p className="mono-label text-destructive">Violation {violations} of {maxViolations}</p>
                 <h2 className="mt-3 text-3xl text-destructive">Warning</h2>
                 <p className="mt-3 text-[15px]">
                   {canLockFullscreen
                     ? "Leaving full-screen or switching tabs during the exam is not allowed. "
                     : "Leaving this app or switching tabs during the exam is not allowed. "}
-                  {3 - violations === 1
+                  {maxViolations - violations === 1
                     ? "One more violation will submit your test automatically."
-                    : `${3 - violations} violations remaining before automatic submission.`}
+                    : `${maxViolations - violations} violations remaining before automatic submission.`}
                 </p>
                 <Button className="mt-6 rounded-[32px] px-7" onClick={returnToFullscreen}>
                   Return to Full-Screen
@@ -509,7 +788,7 @@ function ExamPage() {
               </>
             ) : (
               <>
-                <p className="mono-label text-destructive">Third violation detected</p>
+                <p className="mono-label text-destructive">Violation limit reached</p>
                 <h2 className="mt-3 text-3xl text-destructive">
                   Your test has been submitted automatically
                 </h2>

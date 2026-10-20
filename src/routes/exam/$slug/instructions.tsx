@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,8 @@ function InstructionsPage() {
   } | null>(null);
   const session = typeof window !== "undefined" ? loadSessionForExam(slug) : null;
   const isPhone = useIsPhone();
+  // Entry-time device class only — never eject a student by resizing (B9).
+  const phoneAtEntry = useRef(isPhone).current;
   const [needsAck, ackMobile] = useMobileAck(slug);
 
   useEffect(() => {
@@ -65,7 +67,7 @@ function InstructionsPage() {
       });
   }, [slug, navigate, brief, session?.token]);
 
-  if (needsAck) return <MobileNoticeScreen slug={slug} onContinue={ackMobile} />;
+  if (needsAck && phoneAtEntry) return <MobileNoticeScreen slug={slug} onContinue={ackMobile} />;
 
   async function handleStart() {
     if (!session) return;
