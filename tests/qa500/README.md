@@ -143,20 +143,66 @@ and the final **Ready / Not ready** verdict.
 
 ## 6b. Production-build throughput (B7)
 
-The dev server is a single module-transforming process; its ~13-14 login RPC/s
-ceiling is a harness limit, not the app's. To measure the deployable shape:
+The dev server is a single module-transforming process, so its login ceiling is
+a harness limit, not the app's. The deployable ceiling is bcrypt: the 500 test
+participants use cost-10 hashes, and one compare costs ~62 ms of pure CPU on
+this host (~16 logins/s per process, no matter how it is served). To measure
+the deployable shape:
 
 ```powershell
 npm run qa500:build               # Nitro node-server build (.output/server)
-$env:QA500_PROD_WORKERS="4"; npm run qa500:serve   # cluster on :5180, same test DB
+$env:QA500_PROD_WORKERS="4"; npm run qa500:serve   # 4 instances on :5180-:5183
 
-& $k6 run tests\qa500\k6\scenario-login-spike.js -e BASE_URL=http://localhost:5180 -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"
-& $k6 run tests\qa500\k6\scenario-load-500.js    -e BASE_URL=http://localhost:5180 -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"
+# payloads must carry the BUILD's server-fn ids (SHA-256, not the dev ones)
+node tests\qa500\gen-payloads.mjs --prod
+
+& $k6 run tests\qa500\k6\scenario-login-spike.js -e BASE_URLS=http://localhost:5180,http://localhost:5181,http://localhost:5182,http://localhost:5183 -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"
+& $k6 run tests\qa500\k6\scenario-load-500.js    -e BASE_URLS=http://localhost:5180,http://localhost:5181,http://localhost:5182,http://localhost:5183 -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"
 ```
 
-`PROD=1` tells k6 to skip the Vite module warm-up (there are no module
-endpoints in a build). The build uses `--mode test`, so it is still bound to
-`.env.test` and `assertNotProduction()` still guards the launch.
+**Why separate instances, not `node:cluster`:** Nitro's node-server calls
+`listen({ exclusive: true })`, so clustered workers each bind their own socket;
+on Windows the OS then sends every connection to one worker and the others sit
+idle (measured: 4 workers ≈ 1 worker). `qa500:serve` therefore starts N
+independent processes on consecutive ports and k6 pins each VU to one of them
+(`BASE_URLS`, round-robin) — the same shape as N app servers behind a load
+balancer, which is how the app is deployed.
+
+`PROD=1` tells k6 and the smoke test to skip the Vite module warm-up (there are
+no module endpoints in a build). The build uses `--mode test`, so it is still
+bound to `.env.test` and `assertNotProduction()` still guards the launch.
+After a rebuild, re-run `gen-payloads --prod`: the server-fn ids change with
+the bundle.
+
+**Keep-alive preload.** The instances are started with
+`NODE_OPTIONS="--require scripts/node-keep-alive.cjs"`, which raises Node's
+5-second idle keep-alive window to 65 s. Without it a student who thinks for
+more than 5 seconds sends the next request on a socket the server has already
+closed ("connection forcibly closed") and the write is lost — browsers retry,
+API clients do not (bug B11). A production Node deployment should load the
+same preload, or put the app behind a proxy with `keepalive_timeout 65s`.
+
+**Sizing the login burst.** `qa500:serve` writes `prod-deployment.json` (and
+prints the k6 command) so the report can describe the measured shape. On the
+staging host (6 cores / 12 threads, k6 co-located), 4 instances at the 50
+logins/s spike give p95 ≈ 8 s with 0 application errors — the burst is CPU-bound
+on bcrypt, not broken. Budget `logins_per_s × 0.062` cores for hashing alone:
+~3 cores for 50 logins/s, plus headroom, i.e. 6–8 instances on dedicated
+hardware. Spreading the same 500 logins over 40 s (12.5/s) passes comfortably.
+
+### 6c. Debugging a failed k6 run
+
+A server function that throws answers **HTTP 200** with a serialized
+`{"$TSR/Error":{message}}` envelope, so k6 reports *no* transport error while
+the check fails. Print the first failing responses per VU with:
+
+```powershell
+& $k6 run tests/qa500/k6/scenario-load-500.js -e BASE_URLS=... -e PROD=1 -e DEBUG_BODY=1
+# [dbg] save status=200 body={..."message":{"t":1,"s":"SQLITE_BUSY: database is locked"}...}
+```
+
+`DEBUG_BODY=1` is the fastest way to see the real error behind a failing
+check (it is how bug B10 was found).
 
 ## 7. Cleanup (removes ALL qa500 test data)
 
@@ -198,11 +244,14 @@ node tests\qa500\report\generate-report.mjs
 ## 9. Known limitations of this environment
 
 - **Dev server by default** — the functional e2e + data-integrity runs use
-  `vite dev`; its login ceiling (~13-14 RPC/s per process) is a harness limit.
-  Section 6b measures the built app across N cluster workers, which is the
-  deployment-shaped number used for the throughput verdict.
+  `vite dev`. Section 6b measures the built app across N independent instances,
+  which is the deployment-shaped number used for the throughput verdict.
 - **Local file DB** — SQLite is a single-writer queue; write contention here is
-  pessimistic vs. Turso cloud, read latency is optimistic.
+  pessimistic vs. Turso cloud, read latency is optimistic. The test DB runs in
+  WAL mode and the app creates its libSQL client with `timeout: 5000`, so the
+  driver applies the busy timeout to **every** connection of the pool (a
+  `PRAGMA busy_timeout` only reaches one connection — that was bug B10, and it
+  cost 132 of 500 examinees their attempt in the first 30-minute run).
 - **One machine** runs server + k6 + monitor (CPU contention inflates p95).
 - **Emulated devices** — for physical iOS/Android use BrowserStack/LambdaTest;
   iPhone Safari has no Fullscreen API (app falls back to no-lock + tab-switch

@@ -32,10 +32,23 @@ export function getLibsql(): Client {
       "Missing TURSO_DATABASE_URL environment variable (libsql://... or file:./local.db).",
     );
   }
-  const config: { url: string; authToken?: string } = { url };
+  const config: { url: string; authToken?: string; timeout?: number } = { url };
   const token = process.env["TURSO_AUTH_TOKEN"];
   if (token) config.authToken = token;
+  // A local file DB is shared by several app instances and a pool of
+  // connections. SQLite's default busy timeout is 0, so the second writer
+  // fails instantly with SQLITE_BUSY instead of waiting its turn — under load
+  // that turns into a write outage (and, with a leaked write transaction, a
+  // permanent one). `timeout` is applied by the driver to EVERY connection of
+  // the pool; a `PRAGMA busy_timeout` would only hit the one connection that
+  // happened to run it. WAL is persistent (file-level) and is set once.
+  if (url.startsWith("file:")) {
+    config.timeout = 5000;
+  }
   _client = createClient(config);
+  if (url.startsWith("file:")) {
+    void _client.execute("PRAGMA journal_mode = WAL").catch(() => {});
+  }
   return _client;
 }
 

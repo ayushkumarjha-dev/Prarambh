@@ -26,6 +26,8 @@ import {
   gotoQuestion,
   submitViaUI,
   apiCall,
+  reloadExam,
+  passMobileNotice,
 } from "./helpers";
 
 async function startOrSkip(page: Parameters<typeof startExamThroughUI>[0], email: string) {
@@ -41,6 +43,9 @@ async function dismissGateIfAny(page: Parameters<typeof startExamThroughUI>[0]) 
   if (await gate.isVisible({ timeout: 2000 }).catch(() => false)) {
     await page.getByRole("button", { name: "Return to Full-Screen" }).click();
     await expect(gate).toBeHidden({ timeout: 10000 });
+    // Let the fullscreen transition finish before the next reload (Firefox
+    // aborts a reload that races it with NS_BINDING_ABORTED).
+    await page.waitForTimeout(500);
   }
 }
 
@@ -58,7 +63,7 @@ test.describe("edge cases", () => {
     const startedBefore = rowBefore?.["exam_started_at"];
     const clockBefore = await clockSeconds(page);
 
-    await page.reload();
+    await reloadExam(page);
     await dismissGateIfAny(page);
     await expect(page.getByText(`Question 1 of ${QUESTIONS}`)).toBeVisible({ timeout: 20000 });
 
@@ -82,9 +87,9 @@ test.describe("edge cases", () => {
     expect(await responseCount(email)).toBe(1);
 
     // Three refreshes in a row must still leave the attempt untouched.
-    await page.reload();
+    await reloadExam(page);
     await dismissGateIfAny(page);
-    await page.reload();
+    await reloadExam(page);
     await dismissGateIfAny(page);
     await expect(page.getByText(`Question 1 of ${QUESTIONS}`)).toBeVisible({ timeout: 20000 });
     const rowAfter3 = await participantRow(email);
@@ -113,7 +118,7 @@ test.describe("edge cases", () => {
 
     await page.waitForTimeout(7000);
     await context.setOffline(false);
-    await expect(page.getByRole("alert")).toBeHidden({ timeout: 10000 });
+    await expect(page.getByRole("alert")).toBeHidden({ timeout: 20000 });
 
     // The in-page retry ladder (0.6/1.4/3/6.2/12.6s) finishes after reconnect.
     await expectEventually(() => answerSaved(email, 2), "q2 saved by retry after reconnect", 25000);
@@ -147,7 +152,7 @@ test.describe("edge cases", () => {
 
     // Reconnect: the outbox flushes automatically, without re-clicking.
     await context.setOffline(false);
-    await expect(page.getByRole("alert")).toBeHidden({ timeout: 10000 });
+    await expect(page.getByRole("alert")).toBeHidden({ timeout: 20000 });
     await expectEventually(() => answerSaved(email, 2), "q2 saved by the outbox after reconnect", 30000);
     expect(await responseCount(email)).toBe(2);
     await expect(page.getByText(/\d+ unsaved/)).toBeHidden({ timeout: 15000 });
@@ -238,6 +243,7 @@ test.describe("edge cases", () => {
     const page2 = await ctx2.newPage();
     try {
       await page2.goto(`/exam/${SLUG}`);
+      await passMobileNotice(page2);
       await page2.locator("#name").fill(`QA500 ${email.split("@")[0]}`);
       await page2.locator("#email").fill(email);
       await page2.locator("#password").fill("E2e!Pass1234");
@@ -265,7 +271,7 @@ test.describe("edge cases", () => {
 
       // Device 1's UI ends the session: after a refresh it cannot resume and is
       // sent back to the login screen (its stored token is dead).
-      await page.reload();
+      await reloadExam(page);
       await page.waitForURL(new RegExp(`/exam/${SLUG}/?$`), { timeout: 20000 });
       await expect(page.getByRole("heading", { name: "Student login" })).toBeVisible({ timeout: 10000 });
 

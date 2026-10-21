@@ -102,6 +102,14 @@ function ExamPage() {
     navigate({ to: "/exam/$slug/submitted", params: { slug } });
   }, [SUBMIT_KEY, navigate, slug]);
 
+  /** The session token was rotated by another device — end this session (B3). */
+  const sessionReplaced = useCallback(() => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
+    toast.error("This exam is now open on another device. This session has ended.");
+    navigate({ to: "/exam/$slug", params: { slug } });
+  }, [navigate, slug]);
+
   /**
    * Flush a queued submit. Returns true only when the server ACKed it.
    * Never navigates on failure — that was bug B1 (a swallowed error showed the
@@ -114,10 +122,16 @@ function ExamPage() {
       await finishExam({ data: { slug, token: session.token, reason: queued } });
       goSubmitted();
       return true;
-    } catch {
+    } catch (err) {
+      // A rotated token can never succeed: stop retrying and send the user to
+      // the login screen instead of an endless "waiting for the server" state.
+      if (err instanceof Error && err.message.includes("NOT_AUTHENTICATED")) {
+        sessionReplaced();
+        return true;
+      }
       return false; // stay queued; the retry effect keeps trying
     }
-  }, [finishExam, goSubmitted, session, slug]);
+  }, [finishExam, goSubmitted, session, sessionReplaced, slug]);
 
   const doSubmit = useCallback(
     async (reason: "manual" | "timeout") => {
@@ -220,11 +234,31 @@ function ExamPage() {
     };
     window.addEventListener("online", on);
     window.addEventListener("offline", off);
+    // Some mobile browsers miss connectivity events (after sleep, emulation or
+    // a network handover). Poll as a safety net so the banner can never stick.
+    const poll = setInterval(() => setOnline(navigator.onLine), 2000);
     return () => {
+      clearInterval(poll);
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
     };
   }, []);
+
+  // While offline, confirm with a real request: navigator.onLine can be wrong
+  // (captive portals, emulators), and the banner must clear as soon as the
+  // network is actually back.
+  useEffect(() => {
+    if (online) return;
+    const probe = setInterval(() => {
+      void fetch("/favicon.ico", { method: "HEAD", cache: "no-store", credentials: "same-origin" })
+        // Any HTTP answer (even 404) proves the network is back.
+        .then(() => setOnline(true))
+        .catch(() => {
+          /* still offline */
+        });
+    }, 3000);
+    return () => clearInterval(probe);
+  }, [online]);
 
   // periodic resync with per-candidate jitter (avoids a synchronised burst)
   useEffect(() => {
@@ -434,14 +468,6 @@ function ExamPage() {
       /* storage unavailable */
     }
   }, [OUTBOX_KEY]);
-
-  /** The session token was rotated by another device — end this session (B3). */
-  const sessionReplaced = useCallback(() => {
-    if (submittedRef.current) return;
-    submittedRef.current = true;
-    toast.error("This exam is now open on another device. This session has ended.");
-    navigate({ to: "/exam/$slug", params: { slug } });
-  }, [navigate, slug]);
 
   /**
    * Persistent answer outbox (B2): keeps retrying with a capped backoff until

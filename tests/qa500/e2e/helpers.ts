@@ -224,6 +224,27 @@ export async function passMobileNotice(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Reload the exam page, tolerating Firefox's NS_BINDING_ABORTED when the
+ * browser is still finishing a fullscreen transition (harness flake, not an
+ * app failure).
+ */
+export async function reloadExam(page: Page): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForLoadState("load").catch(() => {});
+      return;
+    } catch (e) {
+      if (attempt < 3 && String(e).includes("NS_BINDING_ABORTED")) {
+        await page.waitForTimeout(700);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 export async function loginToExam(page: Page, email: string): Promise<void> {
   await page.goto(`/exam/${SLUG}`);
   await passMobileNotice(page);
@@ -241,8 +262,9 @@ export async function loginToExam(page: Page, email: string): Promise<void> {
  * (tests skip instead of failing on an environment limitation).
  */
 export async function acceptInstructionsAndStart(page: Page): Promise<void> {
+  const startBtn = page.getByRole("button", { name: "Start the exam" });
   await page.getByRole("checkbox").first().click();
-  await page.getByRole("button", { name: "Start the exam" }).click();
+  await startBtn.click();
   try {
     await page.waitForURL(new RegExp(`/exam/${SLUG}/start`), { timeout: 15000 });
   } catch {
@@ -250,7 +272,14 @@ export async function acceptInstructionsAndStart(page: Page): Promise<void> {
     if (await err.isVisible().catch(() => false)) {
       throw new FullscreenUnavailable("browser refused fullscreen — environment limitation");
     }
-    throw new Error("exam did not navigate to /start");
+    // A dropped/slow first click leaves the learner on the instructions page.
+    // Retry once before declaring the start flow broken.
+    await startBtn.click({ timeout: 5000 }).catch(() => {});
+    try {
+      await page.waitForURL(new RegExp(`/exam/${SLUG}/start`), { timeout: 15000 });
+    } catch {
+      throw new Error("exam did not navigate to /start");
+    }
   }
   await passMobileNotice(page);
   await expect(page.getByText(`Question 1 of ${QUESTIONS}`)).toBeVisible({ timeout: 20000 });

@@ -25,6 +25,7 @@ import {
   gotoLastQuestion,
   submitViaUI,
   apiCall,
+  passMobileNotice,
 } from "./helpers";
 
 async function startOrSkip(page: Parameters<typeof startExamThroughUI>[0], email: string) {
@@ -137,6 +138,7 @@ test.describe("auto-submit", () => {
     const ctx2 = await browser.newContext();
     const page2 = await ctx2.newPage();
     await page2.goto(`/exam/${SLUG}`);
+    await passMobileNotice(page2);
     await page2.locator("#name").fill(`QA500 ${email.split("@")[0]}`);
     await page2.locator("#email").fill(email);
     await page2.locator("#password").fill("E2e!Pass1234");

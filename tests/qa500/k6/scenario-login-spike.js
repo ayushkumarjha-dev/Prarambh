@@ -11,6 +11,7 @@
 import { check } from "k6";
 import { Trend, Rate } from "k6/metrics";
 import { SharedArray } from "k6/data";
+import exec from "k6/execution";
 import { rpc, returned, thinkTime, parkUntilScenarioEnd, makeSummary, warmUp } from "./lib/rpc.js";
 
 const loginDuration = new Trend("login_duration", true);
@@ -61,7 +62,12 @@ export function setup() {
 }
 
 export default function () {
-  const s = PLAN.students[(__VU - 1) % PLAN.students.length];
+  // Student index by ITERATION, not by VU: k6 assigns VUs to iterations in
+  // no particular order, so `__VU - 1` can leave one student untested (and
+  // submit the same student twice) when the iteration count exceeds the
+  // student count. `iterationInTest` is a monotonic counter over all
+  // iterations of the run, so every student is covered exactly once.
+  const s = PLAN.students[exec.scenario.iterationInTest % PLAN.students.length];
   const t0 = Date.now();
   const login = rpc(PLAN.fnIds.login, s.loginBody, "login");
   loginDuration.add(Date.now() - t0);

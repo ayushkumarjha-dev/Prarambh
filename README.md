@@ -531,10 +531,25 @@ bun run build && bun run preview
 | `build`        | `vite build`                     | Production build                                              |
 | `build:dev`    | `vite build --mode development`  | Development-mode build                                        |
 | `preview`      | `vite preview`                   | Serve the production build locally                            |
+| `start:prod`   | `node --require ./scripts/node-keep-alive.cjs .output/server/index.mjs` | Serve the Node production build (65 s keep-alive window — see below) |
 | `db:migrate`   | `node scripts/db-migrate.mjs`    | Apply pending SQL migrations from `migrations/`               |
 | `db:keepalive` | `node scripts/keep-db-awake.mjs` | Health-check the database (connect + read applied migrations) |
 | `lint`         | `eslint .`                       | Lint the whole repo                                           |
 | `format`       | `prettier --write .`             | Format all files with Prettier                                |
+
+### Running the Node production build
+
+```sh
+bun run build
+bun run start:prod          # honours PORT / NITRO_PORT
+```
+
+`start:prod` preloads `scripts/node-keep-alive.cjs`, which raises Node's
+default 5-second idle keep-alive window to 65 s. Without it the server closes
+a connection while a student is still thinking (5–30 s think times), and the
+next request fails with "connection forcibly closed" — browsers retry it, API
+clients do not. When running the build behind a reverse proxy, set
+`keepalive_timeout 65s` there instead.
 
 ---
 

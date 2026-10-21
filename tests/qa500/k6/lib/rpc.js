@@ -20,20 +20,37 @@ export const CSRF_HEADERS = {
 };
 
 export function baseUrl() {
-  return __ENV.BASE_URL || "http://localhost:5173";
+  const list = (__ENV.BASE_URLS || __ENV.BASE_URL || "http://localhost:5173")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (list.length === 1) return list[0];
+  // Multi-instance run (B7): pin each VU to one instance, like a sticky LB.
+  return list[__VU % list.length];
 }
 
 export function rpc(fnId, body, name) {
   const url = `${baseUrl()}/_serverFn/${fnId}`;
   const headers = Object.assign({}, CSRF_HEADERS, { origin: baseUrl() });
   const res = http.post(url, body, { headers, tags: { name: name || "rpc", fn: fnId.slice(0, 10) } });
-  return {
+  const out = {
     status: res.status,
     body: res.body || "",
     serialized: res.headers["X-Tss-Serialized"] === "true",
     ok: res.status === 200 && res.headers["X-Tss-Serialized"] === "true",
   };
+  // DEBUG_BODY=1 prints the first failing response of every VU (the body holds
+  // the server error, e.g. "$TSR/Error" with the message). Without it a failed
+  // check is indistinguishable from a slow one.
+  if ((__ENV.DEBUG_BODY || "0") === "1" && dbgSeen < 3 && (!out.ok || out.body.indexOf('"$TSR/Error"') !== -1)) {
+    dbgSeen++;
+    console.log(`[dbg] ${name || "rpc"} status=${out.status} body=${out.body.slice(0, 300)}`);
+  }
+  return out;
 }
+
+// Per-VU counter (each k6 VU has its own JS runtime).
+let dbgSeen = 0;
 
 /**
  * Register the provider files' server fns — MUST run from setup() before

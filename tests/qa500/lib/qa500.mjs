@@ -126,10 +126,16 @@ export async function openDb() {
     process.exit(1);
   }
   const { createClient } = await import("@libsql/client");
-  return createClient({
+  const db = createClient({
     url: process.env.TURSO_DATABASE_URL,
     authToken: process.env.TURSO_AUTH_TOKEN || undefined,
   });
+  // The staging file DB is shared with the running server; queue on locks
+  // instead of failing with SQLITE_BUSY (no-op for a remote Turso URL).
+  if (String(process.env.TURSO_DATABASE_URL).startsWith("file:")) {
+    await db.execute("PRAGMA busy_timeout = 5000").catch(() => {});
+  }
+  return db;
 }
 
 export async function one(db, sql, args = []) {

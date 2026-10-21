@@ -8,6 +8,7 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
+    "start:prod": "node --require ./scripts/node-keep-alive.cjs .output/server/index.mjs",
     "dev:test": "node tests/start-dev.mjs",
     "test:seed": "node tests/seed.mjs",
     "test:cleanup": "node tests/cleanup.mjs",

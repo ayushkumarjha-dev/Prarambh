@@ -25,7 +25,9 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1, // specs share the staging DB — keep runs strictly serial
   retries: 0,
-  timeout: 120_000,
+  // Mobile projects run the same flows through emulated phones: slower start-up
+  // plus the notice gate, so the long end-to-end cases need more headroom.
+  timeout: 180_000,
   expect: { timeout: 15_000 },
   reporter: [
     ["list"],

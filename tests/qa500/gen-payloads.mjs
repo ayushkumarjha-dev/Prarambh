@@ -16,7 +16,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { fnId, serializeFnData, SERVER_FN_FILES } from "../lib/serverfn.mjs";
+import { fnId, serializeFnData, SERVER_FN_FILES, readProdFnIds } from "../lib/serverfn.mjs";
 import {
   LOAD_SLUG,
   LOAD_QUESTIONS,
@@ -46,16 +46,32 @@ const rows = (
 ).rows;
 const byEmail = new Map(rows.map((r) => [String(r.email).toLowerCase(), r]));
 
-const fnIds = {
-  getExamPublic: fnId(SERVER_FN_FILES.exam, "getExamPublic"),
-  login: fnId(SERVER_FN_FILES.exam, "loginExamParticipant"),
-  brief: fnId(SERVER_FN_FILES.exam, "getExamBrief"),
-  getState: fnId(SERVER_FN_FILES.exam, "getExamState"),
-  start: fnId(SERVER_FN_FILES.exam, "startExam"),
-  save: fnId(SERVER_FN_FILES.exam, "saveAnswer"),
-  violation: fnId(SERVER_FN_FILES.exam, "reportViolation"),
-  submit: fnId(SERVER_FN_FILES.exam, "submitExam"),
+const prodMode = process.argv.includes("--prod");
+
+const fnNames = {
+  getExamPublic: "getExamPublic",
+  login: "loginExamParticipant",
+  brief: "getExamBrief",
+  getState: "getExamState",
+  start: "startExam",
+  save: "saveAnswer",
+  violation: "reportViolation",
+  submit: "submitExam",
 };
+
+const fnIds = prodMode
+  ? (() => {
+      const built = readProdFnIds();
+      const out = {};
+      for (const [key, name] of Object.entries(fnNames)) {
+        if (!built[name]) throw new Error(`production build is missing server fn ${name}`);
+        out[key] = built[name];
+      }
+      return out;
+    })()
+  : Object.fromEntries(
+      Object.entries(fnNames).map(([key, name]) => [key, fnId(SERVER_FN_FILES.exam, name)]),
+    );
 
 const students = [];
 for (let i = 1; i <= LOAD_COUNT; i++) {
@@ -101,7 +117,7 @@ for (let i = 1; i <= LOAD_COUNT; i++) {
 
 const out = {
   createdAt: new Date().toISOString(),
-  meta: { slug: LOAD_SLUG, examId: String(exam.id), questions: LOAD_QUESTIONS, students: students.length },
+  meta: { slug: LOAD_SLUG, examId: String(exam.id), questions: LOAD_QUESTIONS, students: students.length, mode: prodMode ? "prod" : "dev" },
   fnIds,
   publicBody: await serializeFnData({ slug: LOAD_SLUG }),
   students,

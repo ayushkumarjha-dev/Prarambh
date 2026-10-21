@@ -258,11 +258,16 @@ export const loginExamParticipant = createServerFn({ method: "POST" })
       throw new Error("You have already submitted this exam.");
     }
 
-    // Single active session per participant: every successful login rotates the
-    // token, so a second device ends the first session (bug B3). The old device
-    // sees `saved: false` on its next answer/state read and is sent back to login.
-    const nextToken = crypto.randomUUID();
-    await db
+    // One active session per attempt: a login while the exam is RUNNING rotates
+    // the token, so a second device ends the first session (bug B3). Before the
+    // attempt starts there is nothing to take over, so the token is kept —
+    // a page refresh or a re-login on the instructions screen is not a takeover
+    // (and API clients can log in and then reuse the token they were given).
+    const running = participant.status === "in_progress";
+    const nextToken = running || !participant.session_token
+      ? crypto.randomUUID()
+      : String(participant.session_token);
+    const { error: loginWriteError } = await db
       .from("participants")
       .update({
         failed_attempts: 0,
@@ -272,6 +277,9 @@ export const loginExamParticipant = createServerFn({ method: "POST" })
         ...(participant.name !== data.name.trim() ? { name: data.name.trim() } : {}),
       })
       .eq("id", participant.id);
+    // A failed write here would hand out a token that is not stored, and the
+    // learner would be locked out of their own attempt.
+    if (loginWriteError) throw new Error(`LOGIN_WRITE_FAILED: ${loginWriteError.message}`);
 
     return {
       token: nextToken,
@@ -331,7 +339,14 @@ export const getExamState = createServerFn({ method: "POST" })
     if (status === "in_progress" && p.exam_started_at) {
       const elapsed = (Date.now() - new Date(p.exam_started_at).getTime()) / 1000;
       if (elapsed >= meta.duration_minutes * 60) {
-        await db.rpc("submit_exam", { p_participant: p.id, p_reason: "timeout" });
+        // The server clock is the source of truth: an expired attempt is
+        // graded here. If the grading write fails the attempt must NOT look
+        // completed - the learner would lose the chance to submit properly.
+        const { error: timeoutError } = await db.rpc("submit_exam", {
+          p_participant: p.id,
+          p_reason: "timeout",
+        });
+        if (timeoutError) throw new Error(`TIMEOUT_SUBMIT_FAILED: ${timeoutError.message}`);
         status = "completed";
       }
     }
@@ -383,11 +398,15 @@ export const startExam = createServerFn({ method: "POST" })
     if (p.status === "completed") throw new Error("You have already submitted this exam.");
 
     if (p.status === "not_started" || !p.exam_started_at) {
-      await db
+      // Check the write: a failed UPDATE (e.g. a busy database) must not be
+      // swallowed — the attempt would stay "not_started" and every later save
+      // would be rejected without the client noticing.
+      const { error } = await db
         .from("participants")
         .update({ status: "in_progress", exam_started_at: new Date().toISOString() })
         .eq("id", p.id)
         .eq("status", "not_started");
+      if (error) throw new Error(`START_FAILED: ${error.message}`);
     }
     return { ok: true };
   });
@@ -446,9 +465,12 @@ export const reportViolation = createServerFn({ method: "POST" })
     if (!p || p.status !== "in_progress") return { count: 0, submitted: true };
     if ((p as any).exams?.slug !== data.slug) return { count: 0, submitted: true };
 
-    const { data: count } = await db.rpc("increment_violation", {
+    const { data: count, error: violationError } = await db.rpc("increment_violation", {
       p_participant: p.id,
     });
+    // A dropped write would silently lose a proctoring violation, so fail
+    // loudly instead - the client retries the report.
+    if (violationError) throw new Error(`VIOLATION_WRITE_FAILED: ${violationError.message}`);
     const n = Number(count ?? 0);
     const limit = violationLimit();
     if (limit > 0 && n >= limit) {
@@ -476,6 +498,12 @@ export const submitExam = createServerFn({ method: "POST" })
     if ((p as any).exams?.slug !== data.slug) throw new Error("Session not found.");
     if (p.status === "completed") return { submitted: true };
 
-    await db.rpc("submit_exam", { p_participant: p.id, p_reason: data.reason });
+    // Grading must actually land: a swallowed write would tell the learner
+    // "submitted" while the attempt stays open (and the answers unscored).
+    const { error: submitError } = await db.rpc("submit_exam", {
+      p_participant: p.id,
+      p_reason: data.reason,
+    });
+    if (submitError) throw new Error(`SUBMIT_FAILED: ${submitError.message}`);
     return { submitted: true };
   });

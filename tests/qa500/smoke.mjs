@@ -23,19 +23,22 @@ import {
   ART_DIR,
   readJson,
 } from "./lib/qa500.mjs";
-import { callServerFn, warmUpServerFns } from "../lib/serverfn.mjs";
+import { callServerFn, warmUpServerFns, readProdFnIds, useFnIds } from "../lib/serverfn.mjs";
 import path from "node:path";
 
 const base =
-  readJson(path.join(ART_DIR, "..", "dev-server.json"), null)?.baseUrl ??
   process.env.APP_URL ??
+  readJson(path.join(ART_DIR, "..", "dev-server.json"), null)?.baseUrl ??
   "http://localhost:5173";
 const email = smokeEmail(1);
 const fn = (name, data) => callServerFn(base, { fn: name, data });
 
 // Register the server fns first (what a browser page-load would do) — the
 // dev server's in-memory lookup is otherwise empty for API-style callers.
-await warmUpServerFns(base);
+// A production build needs its own (SHA-256) fn ids instead.
+const prodMode = (process.env.PROD || "0") === "1";
+if (prodMode) useFnIds(readProdFnIds());
+else await warmUpServerFns(base);
 
 let failures = 0;
 function check(label, cond, detail = "") {

@@ -15,6 +15,7 @@
 import { check } from "k6";
 import { Trend, Rate } from "k6/metrics";
 import { SharedArray } from "k6/data";
+import exec from "k6/execution";
 import { rpc, returned, threw, thinkTime, parkUntilScenarioEnd, makeSummary, warmUp } from "./lib/rpc.js";
 
 const loginDuration = new Trend("login_duration", true);
@@ -67,7 +68,10 @@ export function setup() {
 }
 
 export default function () {
-  const s = PLAN.students[(__VU - 1) % PLAN.students.length];
+  // Student index by ITERATION, not by VU (k6 assigns VUs to iterations in
+  // no particular order -> one student can be skipped while another is hit
+  // twice). See scenario-login-spike.js.
+  const s = PLAN.students[exec.scenario.iterationInTest % PLAN.students.length];
   const fails = [];
 
   // 1. Login
@@ -107,7 +111,11 @@ export default function () {
     t0 = Date.now();
     const r = rpc(PLAN.fnIds.save, a.body, "save");
     saveDuration.add(Date.now() - t0);
-    if (!check(r, { "answer auto-saved": (x) => returned(x) && x.body.indexOf('"saved"') !== -1 })) {
+    // "invalidSession" in the payload means the server REFUSED the answer
+    // (wrong session, or the attempt is not in_progress). Without this the
+    // check would pass on a refused write and the run would report saved
+    // answers that never reached the database.
+    if (!check(r, { "answer auto-saved": (x) => returned(x) && x.body.indexOf('"saved"') !== -1 && x.body.indexOf('"invalidSession"') === -1 })) {
       fails.push(`save(q${a.q})`);
     }
     // periodic timer/state heartbeat, like the real client (~every 5 questions)

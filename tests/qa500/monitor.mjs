@@ -139,8 +139,10 @@ process.on("SIGTERM", () => {
     dbCompleted: stat("completed"),
     dbInProgress: stat("in_progress"),
     note:
-      "SQLite file DB = single writer; DB connection pooling is N/A. " +
-      "node.exe includes the Vite dev server (SSR + scoring) — dev-mode caveat.",
+      "SQLite file DB = single writer (the app instances share one file, WAL " +
+      "mode + 5s busy timeout). node.exe = the app instances under test " +
+      "(production build) plus any dev server running on the same box; " +
+      "k6.exe = the load generator on the same host (its RSS dominates).",
   };
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
   console.log(`[qa500:monitor] DONE — ${samples.length} samples, summary: ${summaryPath}`);

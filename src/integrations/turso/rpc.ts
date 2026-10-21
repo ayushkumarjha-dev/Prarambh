@@ -64,6 +64,19 @@ async function submitExam(tx: Transaction, participantId: string, reason: string
   const rawQuestions = setDoc?.questions;
   const questions: Array<Record<string, unknown>> = Array.isArray(rawQuestions) ? rawQuestions : [];
 
+  // One read for every answer of this participant instead of one read per
+  // question: this runs inside a write transaction, and the fewer statements
+  // it issues the shorter it holds SQLite's single writer lock (all app
+  // instances share one database file).
+  const selRes = await tx.execute({
+    sql: "SELECT question_id, selected_option FROM responses WHERE participant_id = ?",
+    args: [participantId],
+  });
+  const selected = new Map<number, string | null>();
+  for (const r of selRes.rows as unknown as Array<{ question_id: number; selected_option: string | null }>) {
+    selected.set(Number(r.question_id), r.selected_option ?? null);
+  }
+
   let correct = 0;
   let wrong = 0;
   let unattempted = 0;
@@ -77,11 +90,7 @@ async function submitExam(tx: Transaction, participantId: string, reason: string
     const perQ = Number(q["marks"]);
     const qmarks = Number.isFinite(perQ) && perQ > 0 ? perQ : marksCorrect;
 
-    const selRes = await tx.execute({
-      sql: "SELECT selected_option FROM responses WHERE participant_id = ? AND question_id = ?",
-      args: [participantId, qid],
-    });
-    const sel = (selRes.rows[0]?.["selected_option"] as string | null) ?? null;
+    const sel = selected.get(qid) ?? null;
 
     if (sel == null || sel === "") {
       unattempted += 1;
@@ -164,7 +173,14 @@ export async function runRpc(
       await tx.commit();
       return { data: null, error: null };
     } catch (e) {
-      await tx.rollback();
+      // Roll back, but never let a rollback error hide the real cause: the
+      // client already settles the transaction (its commit/rollback release
+      // the pooled connection even when they throw).
+      try {
+        await tx.rollback();
+      } catch {
+        /* already closed / rolled back */
+      }
       throw e;
     }
   }
@@ -176,7 +192,11 @@ export async function runRpc(
       await tx.commit();
       return { data: count, error: null };
     } catch (e) {
-      await tx.rollback();
+      try {
+        await tx.rollback();
+      } catch {
+        /* already closed / rolled back */
+      }
       throw e;
     }
   }

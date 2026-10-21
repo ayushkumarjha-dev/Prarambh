@@ -113,6 +113,26 @@ for (const p of completed) {
     lostAnswers += 1;
     if (lostDetail.length < 10) lostDetail.push({ email: p.email, responses: rows.length });
   }
+  // Every answer the student actually gave must be in the database with the
+  // same option - a row count alone is not enough (the grader inserts an
+  // "unattempted" row per question, so a lost attempt still has 30 rows).
+  // Only the load phase can be compared answer by answer: in the submit spike
+  // the answers were written by reset-participants.mjs, not by the load plan.
+  const plan = phase === "load" ? planByEmail.get(String(p.email).toLowerCase()) : undefined;
+  if (plan) {
+    const stored = new Map(rows.map((r) => [Number(r.question_id), r.selected_option]));
+    const missing = [];
+    for (const a of plan.answers ?? []) {
+      const got = stored.get(Number(a.q));
+      if (got == null || got === "" || normSet(got) !== normSet(a.option)) {
+        missing.push({ q: a.q, expected: a.option, stored: got ?? null });
+      }
+    }
+    if (missing.length) {
+      lostAnswers += 1;
+      if (lostDetail.length < 10) lostDetail.push({ email: p.email, missing: missing.slice(0, 5), missingCount: missing.length });
+    }
+  }
   const res = results.get(pid);
   if (!res) {
     missingResult += 1;
@@ -177,6 +197,14 @@ v.checks = {
   V5_no_stuck_accounts: { pass: lockedOrFailed.length === 0, count: lockedOrFailed.length },
   V6_no_stray_violations: { pass: violationWeird.length === 0, count: violationWeird.length },
   not_started_with_leftover_answers: { pass: notStartedWithAnswers.length === 0 },
+  // Every seeded student must have finished the attempt in this phase: a
+  // participant left "not_started" (the start write failed) or "in_progress"
+  // (the attempt never closed) means the run lost a live examinee.
+  V7_every_attempt_closed: {
+    pass: v.participants.not_started === 0 && v.participants.in_progress === 0,
+    not_started: v.participants.not_started,
+    in_progress: v.participants.in_progress,
+  },
 };
 
 const outPath = path.join(ART_DIR, `verify-${phase}.json`);

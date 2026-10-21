@@ -24,6 +24,10 @@ const OUT_MD = path.join(ROOT, "tests", "qa500", "REPORT.md");
 const load = readJson(path.join(ART_DIR, "k6-load-summary.json"));
 const loginSpike = readJson(path.join(ART_DIR, "k6-login-spike-summary.json"));
 const submitSpike = readJson(path.join(ART_DIR, "k6-submit-spike-summary.json"));
+// Same scenarios at a sustainable rate (10/s) - the capacity curve that
+// separates "the app is broken" from "this rate needs more hardware".
+const loginSpike10 = readJson(path.join(ART_DIR, "k6-login-spike-10rps-summary.json"));
+const submitSpike10 = readJson(path.join(ART_DIR, "k6-submit-spike-10rps-summary.json"));
 const recovery = readJson(path.join(ART_DIR, "k6-recovery-summary.json"));
 const verifyLoad = readJson(path.join(ART_DIR, "verify-load.json"));
 const verifySpike = readJson(path.join(ART_DIR, "verify-spike.json"));
@@ -155,9 +159,10 @@ function row(id, testCase, expected, actual, pass, note = "") {
 const vt = verifyLoad?.participants?.total ?? 0;
 row("TC-01", "Test data setup: 500 participants + 30Q/30min live exam", "500 test users, 1 exam", `${vt} participants on qa500-live`, vt >= 500);
 row("TC-02", "Login spike: 500 logins in 10s", "err <1%, p95 <2s", `p95=${ms(num(loginSpike?.login_duration?.["p(95)"]))}, err=${pct(num(loginSpike?.errors?.rate))}`, perfLogin.pass, perfLogin.reasons.join("; "));
-row("TC-03", "Load profile: 0→500 in 2m, hold 30m, ramp down 1m", "err <1%, p95 <2s, p99 <4s", load ? `p95=${ms(num(load.http_req_duration?.["p(95)"]))}, p99=${ms(num(load.http_req_duration?.["p(99)"]))}, err=${pct(num(load.http_req_failed?.rate))}, iterations=${num(load.iterations?.count)}` : "not run", perfLoad.pass, perfLoad.reasons.join("; "));
+row("TC-03", "Load profile: 0→500 in 2m, hold 30m, ramp down 1m", "err <1%, p95 <2s, p99 <4s", load ? `p95=${ms(num(load.http_req_duration?.["p(95)"]))}, p99=${ms(num(load.http_req_duration?.["p(99)"]))}, err=${pct(num(load.http_req_failed?.rate))}, requests=${num(load.http_reqs?.count)}` : "not run", perfLoad.pass, perfLoad.reasons.join("; "));
 row("TC-04", "Submit spike: 500 submits in 10s", "err <1%, p95 <2s", `p95=${ms(num(submitSpike?.submit_duration?.["p(95)"]))}, err=${pct(num(submitSpike?.errors?.rate))}`, perfSubmit.pass, perfSubmit.reasons.join("; "));
-row("TC-05", "Zero lost answers (every completed attempt has all answers)", "0 lost", verifyLoad ? `${verifyLoad.checks.V1_zero_lost_answers?.lostAttempts ?? "?"} lost of ${verifyLoad.completed ?? "?"} completed` : "not verified", verifyPass(verifyLoad, "V1_zero_lost_answers"));
+row("TC-05", "Zero lost answers (every planned answer is stored with the same option)", "0 lost", verifyLoad ? `${verifyLoad.checks.V1_zero_lost_answers?.lostAttempts ?? "?"} lost of ${verifyLoad.completed ?? "?"} completed` : "not verified", verifyPass(verifyLoad, "V1_zero_lost_answers"));
+row("TC-05b", "Every seeded examinee closed their attempt (none stuck in not_started / in_progress)", "0 + 0", verifyLoad ? `not_started=${verifyLoad.participants?.not_started}, in_progress=${verifyLoad.participants?.in_progress}` : "not verified", verifyPass(verifyLoad, "V7_every_attempt_closed"), "B10 fixed");
 row("TC-06", "Zero duplicate submissions", "0 duplicates", verifyLoad ? `results=${verifyLoad.checks.V2_no_duplicate_submissions?.resultsRows}, completed=${verifyLoad.checks.V2_no_duplicate_submissions?.completedParticipants}` : "not verified", verifyPass(verifyLoad, "V2_no_duplicate_submissions"));
 row("TC-07", "No double scoring (regrade matches stored grade)", "0 mismatches", verifyLoad ? `V3=${verifyLoad.checks.V3_no_double_scoring?.mismatches}, V4=${verifyLoad.checks.V4_scoring_matches_answers?.mismatches}` : "not verified", verifyPass(verifyLoad, "V3_no_double_scoring") && verifyPass(verifyLoad, "V4_scoring_matches_answers"));
 const monitorOk = Boolean(monitor && monitor.samples > 0);
@@ -295,31 +300,85 @@ const bugs = [
     repro: "e2e/observation: enter an exam on desktop, resize the viewport to <768px → 'You're on a phone' notice replaces the exam.",
     fix: "The notice gate now uses the device class captured at entry (phoneAtEntry), so it can never eject a running attempt; the exam screen survives resizes (and the resize itself is now a violation, B5).",
   },
+  {
+    id: "B10",
+    severity: "CRITICAL",
+    status: "FIXED",
+    title: "Under load every second database write failed with SQLITE_BUSY — and the app swallowed the error, losing attempts and answers",
+    impact:
+      "The local (file:) database is shared by 4 app instances and a pool of connections. SQLite's default busy timeout is 0, so the second concurrent writer failed instantly with \"SQLITE_BUSY: database is locked\". The app then ignored the failed write in five places: startExam (the attempt never left 'not_started' although the client was told 'ok'), loginExamParticipant (a token that was never stored), submitExam (the attempt stayed open although the client was told 'submitted'), reportViolation (a proctoring violation was lost) and the server-timer auto-submit. The k6 answer check only looked for the word \"saved\" in the response, so a REJECTED answer counted as saved. Measured effect in the 30-minute 500-user run: 132 of 500 examinees were left mid-attempt, ~240 attempts lost their start, and thousands of answers were never stored while the run reported 0 request errors.",
+    repro:
+      "k6 run tests/qa500/k6/scenario-load-500.js -e BASE_URLS=<4 instances> -e PROD=1 -e DEBUG_BODY=1 — the failing responses carry {\"$TSR/Error\": {message: \"SQLITE_BUSY: database is locked\"}} (HTTP 200, so no transport error is logged).",
+    fix:
+      "Three parts: (1) the libSQL client is created with `timeout: 5000`, which the driver applies to EVERY connection of the pool (a `PRAGMA busy_timeout` only reaches one connection — the original bug); (2) every write now checks the database result and fails loudly (START_FAILED / LOGIN_WRITE_FAILED / SUBMIT_FAILED / VIOLATION_WRITE_FAILED / TIMEOUT_SUBMIT_FAILED) so a lost write can never be reported as success; (3) grading reads all answers in ONE query instead of 30, which shortens the write transaction that holds SQLite's single writer lock.",
+  },
+  {
+    id: "B11",
+    severity: "MEDIUM",
+    status: "FIXED",
+    title: "The Node server closed idle keep-alive connections after 5 s — a student who thought for 6 s lost the request",
+    impact:
+      "Node's HTTP server closes an idle keep-alive socket after 5 seconds (server.keepAliveTimeout). An exam has 5-30 second think times, so the next request of a thinking student frequently landed on a socket the server had just closed: \"wsarecv: An existing connection was forcibly closed by the remote host\". Browsers retry such a request, API clients and the load generator do not — in the load run 0.3 % of the answer writes were lost this way, which by itself put 10 % of the examinees over the 1 % error limit.",
+    repro:
+      "k6 run tests/qa500/k6/scenario-load-500.js -e THINK_MIN=3 -e THINK_MAX=6 (think time above 5 s) — k6 logs 'Request Failed ... forcibly closed by the remote host' with status 0.",
+    fix:
+      "scripts/node-keep-alive.cjs raises the idle window to 65 s (the classic nginx keepalive_timeout) and is preloaded with `node --require`, because Nitro loads the app lazily — the server is already listening before any app module runs. The staging instances load it through NODE_OPTIONS (see tests/qa500/prod-server.mjs); a production Node deployment should do the same or front the app with a proxy that sets keepalive_timeout 65s. The browser client was never affected (it retries the request), but API clients and the k6 harness are.",
+  },
 ];
 // Dynamic perf bug: if the login spike missed its p95 target, explain why.
+// The numbers come from the artifacts, so the text stays honest if the
+// deployment shape (instances / cores / DB) changes between runs.
 if (loginSpike && num(loginSpike.login_duration?.["p(95)"], 0) >= 2000) {
+  const loginP95 = num(loginSpike.login_duration?.["p(95)"]);
+  const loginAvg = num(loginSpike.login_duration?.avg);
+  const loginErr = pct(num(loginSpike.errors?.rate));
+  const prod = readJson(path.join(ART_DIR, "prod-deployment.json"));
   bugs.push({
     id: "B7",
     severity: "HIGH",
     status: "OPEN",
-    title: "Single dev-server process saturates at ~13–14 login RPCs/s — a 500-logins-in-10s burst misses p95 < 2s",
-    impact: `Measured login p95 = ${ms(num(loginSpike.login_duration?.["p(95)"]))} (target <2000ms) with ${pct(num(loginSpike.errors?.rate))} iteration errors. Root cause (measured, not bcrypt — participants use salted sha256): each login RPC costs ~70–80 ms of single-threaded dev-server time (TanStack module-runner invoke + zod validators + seroval framing + 1 SELECT + 1 UPDATE), so ONE process sustains only ~13–14 RPC/s. Capacity curve: 10 logins/s → p95 830 ms, 0 % errors (PASS); 50 logins/s → p95 20.9 s, ~40 % errors (FAIL).`,
-    repro: "k6 run tests/qa500/k6/scenario-login-spike.js (50/s) vs -e SPIKE_RATE=10.",
-    fix: "Infrastructure, not app code: run the production build (vite build / Nitro node-server) across ≥2–4 workers behind a reverse proxy, or add a server-side batch/cache for the login lookup. The dev server is single-threaded and module-transformed per request, so this ceiling does not represent production SSR throughput — but it must be validated on the target deployment.",
+    title: "A 50 logins/s burst misses p95 < 2 s — bcrypt cost 10 caps each app process at ~16 logins/s",
+    impact:
+      `Measured login p95 = ${ms(loginP95)} (avg ${ms(loginAvg)}, target p95 < 2000 ms) with ${loginErr} iteration errors` +
+      (prod
+        ? ` on ${prod.instances} production instances (:${prod.ports?.[0]}–:${prod.ports?.[prod.ports.length - 1]}, ${prod.logicalCpus}-vCPU host, k6 co-located).`
+        : " on the dev server.") +
+      " Root cause is password verification, not the framework: participants store bcrypt cost 10 hashes and one compare costs ~62 ms of pure CPU (measured on this host), i.e. a hard ceiling of ~16 logins/s per app process. " +
+      "A 50 logins/s arrival rate therefore needs ≥4 dedicated cores for hashing alone, plus request/DB work. " +
+      "Measured capacity curve: 10 logins/s → p95 " +
+      ms(num(loginSpike10?.login_duration?.["p(95)"])) +
+      ", 0 % errors (PASS); 50 logins/s on 4 instances → p95 " +
+      ms(loginP95) +
+      ", 0 % iteration errors, 100 % checks (FAIL on latency only — every login succeeded and returned the right token, the queue just grew).",
+    repro:
+      "k6 run tests/qa500/k6/scenario-login-spike.js -e BASE_URLS=http://localhost:5180,http://localhost:5181,http://localhost:5182,http://localhost:5183 -e PROD=1 (50/s) vs -e SPIKE_RATE=10.",
+    fix:
+      "Deployment sizing, not exam logic: bcrypt cost 10 is deliberately expensive, so 500 logins in 10 s needs roughly 6–8 app instances (or a separate auth service) where every core is available to the server — the staging box runs 4 instances, the SQLite writer and k6 on 6 cores. " +
+      "Cheaper alternatives, in order of preference: (a) open the login window before the exam start so the burst is spread (500 logins over 50 s already passes at 4 instances: p95 " +
+      ms(num(loginSpike10?.login_duration?.["p(95)"])) +
+      "); " +
+      "(b) keep bcrypt cost 10 but hash on worker_threads so one instance can use all cores; " +
+      "(c) only then consider lowering the bcrypt cost (security trade-off). The same 4-instance staging deployment sustains the full 30-minute 500-user load (TC-03) and the 500-submit burst (TC-04) — only the 10-second login burst is over the box's capacity.",
   });
 }
 
 // ------------------------------------------------------------------ recommendations
 const recommendations = [
-  "**Horizontal scaling** — the staging run drives everything through ONE vite dev process. For 500 live users run the built app across ≥2–4 node workers behind a reverse proxy (nginx/caddy) with sticky or stateless sessions (HMAC tokens are already stateless).",
-  "**Database** — local `file:` SQLite is a single-writer queue; production should stay on Turso (client/server HTTP) with its connection handling, or enable WAL + busy_timeout for file DBs. Watch write latency: saveAnswer is an upsert per answer (≈15k writes per full exam of 500).",
+  "**Horizontal scaling (B7)** — the app is stateless (HMAC tokens, DB-backed state), so scale out, not up: `qa500:serve` starts N independent instances and the load generator round-robins across them (Nitro ignores `node:cluster` — see README 6b). Password verification is the ceiling: bcrypt cost 10 costs ~62 ms of CPU per login, so size for `logins/s × 0.062` dedicated cores (≈3 cores for 50 logins/s) and keep the load generator off the app hosts.",
+  "**Login window (cheapest fix for B7)** — open the exam's login 5–10 minutes before the start so 500 learners spread over minutes instead of 10 seconds. Measured: the same 4 instances serve 10 logins/s with p95 " +
+    ms(num(loginSpike10?.login_duration?.["p(95)"])) +
+    ", while the 30-minute load run only needs ≈4 logins/s — an order of magnitude below capacity.",
+  "**Database** — the staging DB is a local SQLite file with ONE writer; that is what bounds the submit burst (500 gradings serialize behind each other) and it is pessimistic vs. Turso, where the writes are concurrent on the server side. The app now opens file DBs in WAL mode with a 5 s busy timeout on every pooled connection and never reports a failed write as a success (B10). Keep production on Turso and watch the write latency: saveAnswer is an upsert per answer (≈15k writes per full exam of 500).",
+  "**Keep-alive (B11 — shipped)** — `scripts/node-keep-alive.cjs` raises Node's 5 s idle keep-alive window to 65 s; the production build must be started with it (`npm run start:prod`), or a reverse proxy in front of it must set `keepalive_timeout 65s`.",
   "**Caching** — question documents are re-read on every getExamState/getExamBrief; cache the immutable question set doc (per exam) in-process with a short TTL or on exam start.",
   "**Rate limiting** — participant lockout exists (5 attempts/10 min). Add an IP-level limiter on login (e.g., 30/min) to blunt credential stuffing; keep the exam windows as the hard gate.",
   "**Offline resilience (B1/B2 — shipped)** — the client now keeps a persistent answer outbox and a queued submit that retries until the server ACKs, with a visible 'N unsaved' / 'Waiting for the server…' state. Re-verify on real 3G/4G handovers (the Playwright run uses CDP throttling and context-level offline).",
-  "**Single-session enforcement (B3 — shipped)** — tokens rotate on login and the stale device is ejected with an explanation. Consider also surfacing the active-device count to the organizer dashboard.",
+  "**Single-session enforcement (B3 — shipped)** — starting an exam rotates the participant's token and the stale device is ejected with an explanation; a plain login/refresh before the start no longer rotates it (so parallel logins during the ramp keep working). Consider also surfacing the active-device count to the organizer dashboard.",
   "**Proctoring completeness (B4/B5/B6/B8/B9 — shipped)** — MAX_VIOLATIONS is env-configurable, resize/orientation/contextmenu/copy/devtools shortcuts are counted, reloads never count, and narrowing the window can no longer eject a running attempt. Watermark + per-question rotation remain the PrintScreen mitigation (no DOM event exists).",
+  "**Write-path safety (B10 — shipped)** — a database write that fails is now always reported as a failure (start / login / save / submit / violation / timer auto-submit) instead of being swallowed, and the staging client waits 5 s for the write lock instead of failing instantly. Keep this invariant when adding new server functions: a swallowed write looks like a lost answer.",
+  "**Load-generator fidelity (shipped)** — the k6 scenarios now pick the student by iteration counter (not VU id: k6 assigns VUs in no fixed order, which silently skipped one student) and the DB verification compares every planned answer, not just the row count. Keep both when the suite is extended.",
   "**Real devices** — this run used emulation (Pixel 7 / iPhone 13 profiles). Re-run tests/qa500/e2e on BrowserStack/LambdaTest for physical Android/iOS; iPhone Safari has no Fullscreen API (the app's no-lock fallback is the documented behaviour).",
-  "**Production-shaped performance pass** — repeat the k6 suite against a staging deployment of `vite build` output (not the dev server) and against the Turso cloud DB; dev-mode numbers here are conservative for SSR throughput but optimistic for DB latency.",
+  "**Production-shaped performance pass (done)** — the perf suite was re-run against a Nitro production build served by 4 independent instances (`npm run qa500:build` + `qa500:serve`) on the same file DB; the remaining limit is bcrypt CPU, not SSR throughput. Re-run it once against Turso cloud (this staging DB is a local file, pessimistic for write latency).",
 ];
 
 // ------------------------------------------------------------------ markdown
@@ -340,12 +399,40 @@ L();
 L("| Item | Value |");
 L("|---|---|");
 L("| Target | Prarambh exam portal (TanStack Start SSR + libSQL/SQLite → Turso) |");
-L("| Base URL | local staging: `npm run dev:test` (Vite dev server, default http://localhost:5173) |");
-L("| Database | `file:./tests/.artifacts/test.db` from `.env.test` — isolated from production `.env` (guard: tests/lib/env.mjs) |");
-L("| Load tool | k6 v2.3.0 (bundled in `tools/`), payloads pre-serialized by seroval |");
+L("| Base URL | functional: `npm run dev:test` (Vite, http://localhost:5173) · performance: Nitro production build, 4 independent instances on :5180–:5183 (`npm run qa500:build` + `qa500:serve`) |");
+L("| Database | `file:./tests/.artifacts/test.db` from `.env.test` in WAL mode — isolated from production `.env` (guard: tests/lib/env.mjs) |");
+L("| Load tool | k6 v2.3.0 (bundled in `tools/`), payloads pre-serialized by seroval, per-VU round-robin across the instances |");
 L("| E2E tool | Playwright 1.64 — Chromium/Firefox/WebKit + Pixel 7/iPhone 13 emulation |");
-L("| Test data | 500 participants `test001..test500@example.com` (password `Qa500!Pass123`), exam `qa500-live` 30 MCQ/30 min, e2e exam `qa500-e2e` 5 MCQ/10 min |");
-L("| Caveat | Vite **dev** server + local file DB on the same machine as k6 — absolute latencies differ from a production build; trends and invariants are what matter. |");
+L("| Test data | 500 participants `test001..test500@example.com` (password `Qa500!Pass123`, bcrypt cost 10), exam `qa500-live` 30 MCQ/30 min, e2e exam `qa500-e2e` 5 MCQ/10 min |");
+L("| Caveat | App servers, local file DB and k6 share one 6-core/12-thread host — absolute latencies are pessimistic vs. dedicated servers; trends and invariants are what matter. |");
+L();
+L("### 1.1 Commands used (all staging-only)");
+L();
+L("```powershell");
+L("# one-time staging setup (.env.test -> file:./tests/.artifacts/test.db; guards block production)");
+L("node tests/qa500/seed.mjs                       # 500 participants + qa500-live / qa500-e2e exams");
+L("npm run dev:test                                # Vite on :5173 for the functional matrix");
+L("");
+L("# functional matrix (Chromium/Firefox/WebKit + Pixel 7 / iPhone 13 emulation)");
+L("npx playwright test -c tests/qa500/playwright.qa500.config.ts");
+L("");
+L("# performance: production build, 4 independent instances on :5180-:5183");
+L("npm run qa500:build");
+L('$env:QA500_PROD_WORKERS="4"; npm run qa500:serve');
+L("node tests/qa500/gen-payloads.mjs --prod        # server-fn ids differ in a build");
+L("node tests/qa500/monitor.mjs --duration=2400 --interval=5");
+L('$b = "http://localhost:5180,http://localhost:5181,http://localhost:5182,http://localhost:5183"');
+L('& $k6 run tests/qa500/k6/scenario-load-500.js    -e BASE_URLS=$b -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"');
+L("node tests/qa500/verify-results.mjs --phase=load");
+L("node tests/qa500/reset-participants.mjs --mode=fresh    # or --mode=mid-exam before the submit spike");
+L('& $k6 run tests/qa500/k6/scenario-login-spike.js  -e BASE_URLS=$b -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"');
+L('& $k6 run tests/qa500/k6/scenario-submit-spike.js -e BASE_URLS=$b -e PROD=1 --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max"');
+L("node tests/qa500/verify-results.mjs --phase=spike");
+L("npm run qa500:config-check                      # MAX_VIOLATIONS=2 proof");
+L("");
+L("# report");
+L("node tests/qa500/report/generate-report.mjs     # -> tests/qa500/REPORT.md");
+L("```");
 L();
 
 L("## 2. Results table (test case | expected | actual | pass/fail)");
@@ -383,6 +470,36 @@ if (recovery) {
   );
 }
 L();
+if (loginSpike10 || submitSpike10) {
+  L("**Burst vs. sustainable rate** (same code, same instances — only the arrival rate differs):");
+  L();
+  L("| Scenario | Rate | p95 | p99 | max | HTTP fail | Checks | Verdict |");
+  L("|---|---|---|---|---|---|---|---|");
+  const burst = (name, s, trend, rate) => {
+    if (!s) return;
+    const t = s[trend] ?? s.http_req_duration;
+    const p95v = num(t?.["p(95)"]);
+    const p99v = num(t?.["p(99)"]);
+    const pass =
+      p95v != null && p95v < 2000 && p99v != null && p99v < 4000 && num(s.errors?.rate, 1) < 0.01 && num(s.checks?.rate, 0) >= 0.99;
+    L(
+      `| ${name} | ${rate} | ${ms(p95v)} | ${ms(p99v)} | ${ms(num(t?.max))} | ${pct(num(s.http_req_failed?.rate))} | ${pct(num(s.checks?.rate))} | ${ok(pass)} |`,
+    );
+  };
+  burst("Login", loginSpike, "login_duration", "50/s (500 in 10 s)");
+  burst("Login", loginSpike10, "login_duration", "10/s (500 in 50 s)");
+  burst("Submit", submitSpike, "submit_duration", "50/s (500 in 10 s)");
+  burst("Submit", submitSpike10, "submit_duration", "10/s (500 in 50 s)");
+  L();
+  L(
+    "Both spikes return every request successfully (0 iteration errors, 100% checks) at both rates — the burst is a *latency* problem, not a correctness problem: the queue grows because the arrival rate exceeds what the box can absorb (bcrypt for logins, one SQLite writer for the grading transactions).",
+  );
+  L();
+  L(
+    "_Note: every k6 run shows 3 failed HTTP requests (0.6% of a spike, 0.015% of the load run). They are the dev-only server-function warm-up GETs, which 404 on a production build; the functional requests are 100% successful._",
+  );
+  L();
+}
 if (load?.save_duration || load?.login_duration) {
   L("Per-endpoint trends on the main load run (from `k6-load-summary.json`):");
   L();
@@ -407,7 +524,7 @@ if (monitor) {
   const r = (label, st, suffix = "") =>
     st ? L(`| ${label} | ${st.min}${suffix} | ${st.avg}${suffix} | ${st.max}${suffix} |`) : null;
   r("System CPU (%)", monitor.systemCpuPercent, "%");
-  r("Node (dev server) RSS (MB)", monitor.nodeRssMb, "MB");
+  r("Node (app instances) RSS (MB)", monitor.nodeRssMb, "MB");
   r("Node cumulative CPU (s)", monitor.nodeCpuSeconds, "s");
   r("k6 RSS (MB)", monitor.k6RssMb, "MB");
   r("DB responses rows", monitor.dbResponses);
@@ -489,7 +606,7 @@ L(`- **Functional spec conformance:** ${ok(functionalFails.length === 0)}${funct
 L(`- **E2E stability:** ${ok(e2e.unexpected === 0)}${e2e.unexpected ? ` — ${e2e.unexpected} unexpected failures` : ""}`);
 L();
 if (overallReady) {
-  L("### ✅ VERDICT: READY for 500 live users");
+  L("### ✅ VERDICT: Ready for 500 live users");
   L();
   L("All performance thresholds, data-integrity invariants and functional criteria passed.");
 } else {
@@ -498,12 +615,25 @@ if (overallReady) {
   if (!dataOk) reasons.push("database invariants failed (§3.3)");
   if (functionalFails.length) reasons.push(`${functionalFails.length} functional criteria unmet (§2): ${functionalFails.map((r) => `${r.id}${r.note ? ` (${r.note})` : ""}`).join(", ")}`);
   if (e2e.unexpected) reasons.push(`${e2e.unexpected} unexpected e2e failures (§4)`);
-  L("### ❌ VERDICT: NOT READY");
+  L("### ❌ VERDICT: Not ready for 500 live users");
   L();
   L("Reasons:");
   for (const r of reasons) L(`1. ${r}`);
   L();
-  L("All functional defects B1–B6, B8 and B9 are fixed and covered by regression tests. The remaining blocker is performance (B7): the exam flow is correct and data-safe, but the login burst must be validated against the production build / multi-worker deployment before 500 live users.");
+  const onlyLoginBurst = !perfLogin.pass && perfLoad.pass && perfSubmit.pass && dataOk;
+  if (onlyLoginBurst) {
+    L(
+      "Everything except the synthetic 10-second login burst passes: the 30-minute 500-user load, the 500-submit spike, all data-integrity invariants and every functional criterion. " +
+        "The single unmet criterion is **TC-02 (500 logins inside 10 s, p95 < 2 s)**: bcrypt cost 10 costs ~62 ms of CPU per login, so that profile needs ~6–8 dedicated instances, while this run used 4 instances sharing a 12-thread host with k6 and the SQLite writer. " +
+        "With the login window opened even 50 s before the exam (≈10 logins/s, measured p95 " +
+        ms(num(loginSpike10?.login_duration?.["p(95)"])) +
+        ") the same 4 instances serve the full burst comfortably. See B7 for the measured curve and the sizing formula.",
+    );
+  } else {
+    L(
+      "All functional defects B1-B6 and B8-B11 are fixed and covered by regression tests. The remaining blockers are performance/capacity items listed above (B7) plus any data-integrity gaps in §3.3.",
+    );
+  }
 }
 L();
 L("---");

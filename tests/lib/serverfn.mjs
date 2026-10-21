@@ -17,6 +17,9 @@
  * tests/load/gen-payloads.mjs instead of hand-building JSON in k6.
  */
 import { toJSONAsync, fromCrossJSON } from "seroval";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 // Same plugins the real client uses (`getDefaultSerovalPlugins()` in
 // @tanstack/start-client-core). ShallowErrorPlugin deserializes the
 // `$TSR/Error` nodes the server sends for thrown errors — with an empty
@@ -40,6 +43,41 @@ export function fnId(file, exportName) {
 export const PROVIDER_MODULES = Object.values(SERVER_FN_FILES).map((f) => f.split("?")[0]);
 
 /**
+ * Production builds register server functions under SHA-256 ids, not the dev
+ * base64url of {file, export}. Read that mapping straight from the built
+ * resolver so API-style clients (smoke, k6 payloads) can hit `qa500:serve`.
+ */
+export function readProdFnIds(buildDir = fileURLToPath(new URL("../../.output/server", import.meta.url))) {
+  if (!fs.existsSync(buildDir)) {
+    throw new Error(`no production build at ${buildDir} — run: npm run qa500:build`);
+  }
+  const resolver = fs
+    .readdirSync(buildDir)
+    .find((f) => f.startsWith("__23tanstack-start-server-fn-resolver") && f.endsWith(".mjs"));
+  if (!resolver) throw new Error(`server-fn resolver not found in ${buildDir}`);
+  const src = fs.readFileSync(path.join(buildDir, resolver), "utf8");
+  const map = {};
+  for (const m of src.matchAll(
+    /"([0-9a-f]{64})":\s*\{\s*functionName:\s*"([A-Za-z0-9_]+)_createServerFn_handler"/g,
+  )) {
+    map[m[2]] = m[1];
+  }
+  if (!Object.keys(map).length) throw new Error("no server-fn ids parsed from the production build");
+  return map;
+}
+
+/** Switch fn-id resolution to a fixed map (production build). */
+export function useFnIds(map) {
+  idOverride = map;
+}
+
+let idOverride = null;
+
+function resolveFnId(file, name) {
+  return idOverride?.[name] ?? fnId(file, name);
+}
+
+/**
  * Register the provider files' server fns on a running dev server.
  *
  * TanStack Start only inserts a server fn into its dev lookup table
@@ -52,6 +90,9 @@ export const PROVIDER_MODULES = Object.values(SERVER_FN_FILES).map((f) => f.spli
  * dev-server restart (the table does not survive a restart).
  */
 export async function warmUpServerFns(base) {
+  // A production build has no Vite module endpoints — the functions are
+  // registered at build time. Opt in with PROD=1 when targeting `qa500:serve`.
+  if ((process.env.PROD || "0") === "1") return;
   for (const path of PROVIDER_MODULES) {
     const res = await fetch(new URL(path, base), {
       headers: { accept: "*/*" },
@@ -81,7 +122,7 @@ export async function callServerFn(base, options) {
     signal,
     token,
   } = options;
-  const url = `${String(base).replace(/\/+$/, "")}/_serverFn/${fnId(file, fn)}`;
+  const url = `${String(base).replace(/\/+$/, "")}/_serverFn/${resolveFnId(file, fn)}`;
   const origin = new URL(url).origin;
   const h = {
     "x-tsr-serverFn": "true",
