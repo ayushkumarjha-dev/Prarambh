@@ -45,15 +45,25 @@ function AdminLogin() {
       if (mode === "signup") {
         // Bootstrap only: the server rejects sign-up once any organizer exists.
         const { error } = await authClient.signUp({ email, password });
-        if (error) throw error;
+        if (error) {
+          // Server functions return typed failures ({ ok: false, code,
+          // message }) — show the real user-safe message, never a generic one.
+          toast.error(error.message);
+          return;
+        }
         toast.success("Organizer account created — signed in.");
       } else {
         const { error } = await authClient.signInWithPassword({ email, password });
-        if (error) throw error;
+        if (error) {
+          toast.error(error.message);
+          return;
+        }
       }
       // Replace: back must never return to the login form after sign-in.
       navigate({ to: "/panel-admin", search: { view: "dashboard" }, replace: true });
     } catch (err) {
+      // authClient surfaces every auth failure as { error }; this only guards
+      // navigation/framework errors, which are real Error instances.
       toast.error(err instanceof Error ? err.message : "Sign in failed.");
     } finally {
       setBusy(false);

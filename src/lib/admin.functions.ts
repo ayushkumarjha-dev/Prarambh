@@ -1,6 +1,11 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireOrganizerAuth } from "@/integrations/turso/auth-middleware";
 
+// Re-exported so the health server function is part of the module graph the
+// admin UI bundle references (TanStack Start only registers server functions
+// reachable from the graph). Defined in ./health.functions.
+export { organizerHealthCheck, type OrganizerHealthReport } from "./health.functions";
+
 /** exams-table update payload (replaces the generated Supabase Database type). */
 type ExamUpdate = Partial<{
   title: string;
