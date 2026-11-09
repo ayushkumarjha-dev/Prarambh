@@ -73,12 +73,14 @@ function AdminLogin() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-5 py-16">
       <form onSubmit={onSubmit} className="w-full max-w-sm rounded-[22px] border border-border p-8">
-        <LogoMark className="size-12 rounded-2xl shadow-sm" />
-        <p className="mono-label mt-4 text-muted-foreground">{brand.appName}</p>
-        <h1 className="mt-2 text-3xl">Organizer Login</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Create exams, share private links, and manage student credentials.
-        </p>
+        <div className="flex flex-col items-center text-center">
+          <LogoMark className="size-16 rounded-2xl shadow-md" />
+          <p className="mono-label mt-5 text-muted-foreground">{brand.appName}</p>
+          <h1 className="mt-2 text-3xl">Organizer Login</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Create exams, share private links, and manage student credentials.
+          </p>
+        </div>
         <div className="mt-6 space-y-2">
           <Label htmlFor="email" className="mono-label text-muted-foreground">
             Email
